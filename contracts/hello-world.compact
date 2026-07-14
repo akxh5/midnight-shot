@@ -1,12 +1,40 @@
+// ============================================================
+// hello-world.compact — Midnight Network Hello World Contract
+// ============================================================
+//
+// PRIVACY MODEL
+// ─────────────
+// PUBLIC  (on-chain, visible to anyone):
+//   • message : the string stored on the ledger (Opaque<"string">)
+//               Anyone can read this value via the indexer.
+//
+// PRIVATE (never on-chain):
+//   • N/A in this contract — the message is intentionally PUBLIC.
+//               The caller passes `customMessage` as a public circuit
+//               parameter; disclose() is used explicitly to signal
+//               that the value is being written to public ledger state.
+//
+// WHAT disclose() DOES HERE:
+//   • disclose(customMessage) marks the circuit parameter as a
+//     deliberate public output of the ZK proof. Without this, the
+//     compiler would reject ledger writes of potential witness values.
+//     Here, disclose() communicates programmer intent: "yes, I mean
+//     to make this value public."
+//
+// In future versions (e.g., a ZK whitelist or land registry):
+//   • Replace `customMessage` with a witness() call to keep input private
+//   • Use disclose() only on derived/commitment values, not raw inputs
+// ============================================================
+
 pragma language_version >= 0.23;
 
 import CompactStandardLibrary;
 
-// Public ledger state - visible on blockchain
+// Public ledger state — visible to anyone reading the blockchain
 export ledger message: Opaque<"string">;
 
-// Circuit to store a message on the blockchain
-// The message will be publicly visible
+// Circuit: store a message on the blockchain.
+// The message is publicly visible — disclose() makes this explicit.
 export circuit storeMessage(customMessage: Opaque<"string">): [] {
     message = disclose(customMessage);
 }
