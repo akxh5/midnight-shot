@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 npm-debug.log*
+
+# Midnight local LevelDB state (proof server / node data)
+midnight-level-db/
 yarn-debug.log*
 yarn-error.log*
 
