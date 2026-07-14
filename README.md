@@ -7,7 +7,6 @@
 | Network | Address |
 |---------|---------|
 | Preview | `1e773bbc8d2e7a6af104d1ade8f3a2bd32fb4d5b2cc507c5f38ca43dfe861751` |
-| Preprod | [PASTE ADDRESS AFTER DEPLOY] |
 
 ---
 
