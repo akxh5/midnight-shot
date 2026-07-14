@@ -18,9 +18,6 @@ build/
 .env.test.local
 .env.production.local
 
-# Contract artifacts
-contracts/managed/
-
 # Deployment info
 deployment.json
 

@@ -1,6 +1,6 @@
-# mn-demo — Midnight Privacy Counter
+# mn-demo — Midnight Hello World
 
-> A privacy-preserving counter contract on the Midnight Network — increments by a private witness step so only the result is ever revealed on-chain via `disclose()`.
+> A hello-world smart contract on the Midnight Network that stores a message on the public ledger, demonstrating how `disclose()` explicitly gates what data becomes visible on-chain.
 
 ## Contract Address
 
@@ -13,24 +13,31 @@
 
 ## What This Does
 
-This contract maintains a public counter on the Midnight blockchain. Anyone can read the current count. However, the **amount** by which the counter is incremented is kept **completely private** — the caller provides it as a zero-knowledge witness, and only the final result is published on-chain via `disclose()`.
+The contract (`contracts/hello-world.compact`) has a single public ledger field called `message` and one circuit called `storeMessage`. When a user calls `storeMessage("Hello, Midnight!")`, the message is written directly to the on-chain ledger and is visible to anyone reading the blockchain via the Midnight indexer.
+
+The key Midnight primitive demonstrated here is **`disclose()`**: even for a fully public value, the Compact compiler requires you to explicitly call `disclose(customMessage)` before assigning it to ledger state. This is intentional — it forces every developer to consciously declare which values leave the privacy boundary. Nothing becomes on-chain by accident.
+
+```compact
+export ledger message: Opaque<"string">;
+
+export circuit storeMessage(customMessage: Opaque<"string">): [] {
+    message = disclose(customMessage);   // explicit public declaration
+}
+```
 
 ---
 
 ## Privacy Model
 
 - **What is PUBLIC (on-chain, visible to anyone):**
-  - The current counter value (`round`)
-  - The admin public key (`admin`)
-  - The `next_counter` value after each increment (published as proof output via `disclose()`)
+  - `message` — the string stored on the ledger. Readable by anyone via the Midnight indexer GraphQL API. Updated every time `storeMessage` is called.
 
 - **What is PRIVATE (private witness, never on-chain):**
-  - `secretStep()` — the exact increment amount chosen by the caller; never stored or revealed unless the caller explicitly calls `disclose(step)`
-  - `adminKey()` — the 32-byte secret used to authenticate a counter reset
+  - Nothing in this hello-world contract — `customMessage` is a **public circuit parameter**, not a private witness. The contract intentionally makes everything public as a starting demonstration.
 
-- **What the user PROVES without revealing:**
-  - "I know a positive step `s` such that `new_counter = old_counter + s`" — the ZK circuit proves correctness without leaking `s`
-  - "I know the admin secret" — proven via circuit assertion, raw secret never stored on-chain
+- **What `disclose()` does here:**
+  - `disclose(customMessage)` is used deliberately to satisfy the Compact compiler's privacy enforcement. It is the explicit gateway between circuit computation and public ledger state. Without it, the compiler rejects any ledger write — even of a public parameter — because it cannot distinguish intentional disclosure from accidental leakage.
+  - In future contracts (e.g., a ZK whitelist or land registry), you would replace the public `customMessage` parameter with a `witness()` call, and use `disclose()` only on derived commitment values — keeping the raw input fully private.
 
 ---
 
@@ -58,14 +65,14 @@ This contract maintains a public counter on the Midnight blockchain. Anyone can 
 
 ```bash
 # 1. Clone the repo
-git clone <your-repo-url>
-cd mn-demo
+git clone https://github.com/akxh5/midnight-shot.git
+cd midnight-shot
 
 # 2. Install the Compact compiler (one-time global install)
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/midnightntwrk/compact/releases/latest/download/compact-installer.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
-compact update
+compact update      # installs compactc 0.31.1 and sets it as default
 
 # 3. Install npm dependencies
 npm install
@@ -75,7 +82,7 @@ npm run setup
 
 # To deploy to Preview testnet instead:
 npm run setup -- --network preview
-# (Fund the wallet at the faucet URL that prints, then re-run if it times out)
+# (Fund the wallet at the faucet URL printed by the script, then re-run if it times out)
 ```
 
 ---
@@ -83,11 +90,13 @@ npm run setup -- --network preview
 ## Run Tests
 
 ```bash
-# End-to-end smoke test (requires devnet running + contract deployed)
-npm run test:e2e
+npm test
 ```
 
-The e2e check reconnects to the deployed contract and reads its ledger state. Exits 0 if the contract is live and indexable.
+The test suite (`tests/hello-world.test.ts`) covers:
+- **Circuit logic** — `storeMessage` updates ledger state correctly
+- **State transitions** — message changes across multiple calls
+- **Privacy model** — `disclose()` semantics and public output correctness
 
 ---
 
@@ -96,11 +105,12 @@ The e2e check reconnects to the deployed contract and reads its ledger state. Ex
 | Script | Description |
 |---|---|
 | `npm run setup` | One-shot: start devnet, compile, deploy |
-| `npm run compile` | Compile the Compact contract |
+| `npm run compile` | Compile `contracts/hello-world.compact` → `contracts/managed/hello-world/` |
 | `npm run deploy` | Deploy (requires devnet up + compiled) |
 | `npm run cli` | Interactive CLI to call circuits |
 | `npm run check-balance` | Print NIGHT and DUST balances |
-| `npm run test:e2e` | Smoke + read-back check |
+| `npm run test:e2e` | Smoke + read-back check against deployed contract |
+| `npm run verify:deploy` | Query indexer to confirm contract is live |
 | `npm run clean` | Remove compiled artifacts and state |
 
 ---
@@ -137,22 +147,28 @@ docker compose down -v
 ```
 mn-demo/
 ├── contracts/
-│   ├── hello-world.compact       # Compact smart contract source
+│   ├── hello-world.compact          # Compact smart contract source
 │   └── managed/
-│       └── hello-world/          # Auto-generated by compact compile
-│           ├── contract/         # TypeScript bindings
-│           ├── keys/             # Proving & verifying keys per circuit
-│           └── zkir/             # Compiled ZK IR files
+│       └── hello-world/             # Auto-generated by: npm run compile
+│           ├── compiler/            # Compiler metadata (contract-info.json)
+│           ├── contract/            # TypeScript bindings (index.d.ts, index.js)
+│           ├── keys/                # Proving & verifying keys (storeMessage.prover/verifier)
+│           └── zkir/                # Compiled ZK IR files (storeMessage.zkir)
 ├── scripts/
-│   └── e2e-check.ts              # Smoke + read-back test
+│   ├── e2e-check.ts                 # End-to-end smoke test
+│   └── check-deploy.sh              # Indexer verification helper
 ├── src/
-│   ├── network.ts                # Network selection + state management
-│   ├── wallet.ts                 # Wallet construction + sync-state cache
-│   ├── setup.ts                  # Orchestrator for npm run setup
-│   ├── deploy.ts                 # Deploy the contract
-│   ├── cli.ts                    # Interact with deployed contract
-│   └── check-balance.ts          # NIGHT / DUST balance
-├── docker-compose.yml            # node + indexer + proof-server
+│   ├── network.ts                   # Network selection + state management
+│   ├── wallet.ts                    # Wallet construction + sync-state cache
+│   ├── setup.ts                     # Orchestrator for npm run setup
+│   ├── deploy.ts                    # Deploy the contract
+│   ├── cli.ts                       # Interact with deployed contract
+│   └── check-balance.ts             # NIGHT / DUST balance checker
+├── tests/
+│   └── hello-world.test.ts          # 9-test suite for circuit + privacy model
+├── docker-compose.yml               # node + indexer + proof-server
+├── PRIVACY.md                       # Deep dive: Midnight's three execution contexts
+├── DEPLOYMENT.md                    # Step-by-step deploy log with contract address
 ├── package.json
 └── tsconfig.json
 ```
