@@ -10,6 +10,7 @@ yarn-error.log*
 # Build output
 dist/
 build/
+.next/
 
 # Environment variables
 .env

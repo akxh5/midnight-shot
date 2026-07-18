@@ -1,3 +1,5 @@
+'use client';
+
 import { useState, useEffect, useCallback } from 'react';
 import { InitialAPI, ConnectedAPI } from '@midnight-ntwrk/dapp-connector-api';
 import { FetchZkConfigProvider } from '@midnight-ntwrk/midnight-js-fetch-zk-config-provider';
@@ -81,8 +83,9 @@ export function useMidnight(): UseMidnightResult {
       const contractState = await publicDataProvider.queryContractState(PREPROD_CONTRACT_ADDRESS);
       if (contractState && contractState.data) {
         const ledgerState = HelloWorld.ledger(contractState.data);
-        // Compact Opaque<"string"> is a Uint8Array represented as bytes, so convert to string
-        const msg = new TextDecoder().decode(new Uint8Array(ledgerState.message));
+        const msg = typeof ledgerState.message === 'string' 
+          ? ledgerState.message 
+          : new TextDecoder().decode(new Uint8Array(ledgerState.message as any));
         setCurrentMessage(msg);
       } else {
         setCurrentMessage(null);
@@ -152,7 +155,7 @@ export function useMidnight(): UseMidnightResult {
       );
 
       // 7. Find the deployed contract
-      const contractInstance: any = await findDeployedContract(providers, {
+      const contractInstance: any = await findDeployedContract(providers as any, {
         compiledContract: compiledContract as any,
         contractAddress: PREPROD_CONTRACT_ADDRESS
       });

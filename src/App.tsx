@@ -1,3 +1,5 @@
+'use client';
+
 import React from 'react';
 import { useMidnight } from './hooks/useMidnight';
 import WalletConnect from './components/WalletConnect';
