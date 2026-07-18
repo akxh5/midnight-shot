@@ -52,8 +52,21 @@ export function useMidnight(): UseMidnightResult {
     setIsConnecting(true);
     setError(null);
     try {
+      console.log('Window midnight object:', window.midnight);
       const midnightWallets = window.midnight;
-      const initialAPI = midnightWallets?.lace || midnightWallets?.mnLace;
+      
+      // 1. Try known keys
+      let initialAPI = midnightWallets?.lace || midnightWallets?.mnLace;
+      
+      // 2. Dynamic fallback: pick the first wallet or one matching "lace"
+      if (!initialAPI && midnightWallets) {
+        const keys = Object.keys(midnightWallets);
+        if (keys.length > 0) {
+          const laceKey = keys.find(k => k.toLowerCase().includes('lace'));
+          initialAPI = midnightWallets[laceKey || keys[0]];
+        }
+      }
+
       if (!initialAPI) {
         throw new Error('Lace Wallet not detected. Please install the Lace extension.');
       }
