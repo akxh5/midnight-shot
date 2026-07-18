@@ -53,11 +53,10 @@ export function useMidnight(): UseMidnightResult {
     setError(null);
     try {
       const midnightWallets = window.midnight;
-      if (!midnightWallets || !midnightWallets.mnLace) {
+      const initialAPI = midnightWallets?.lace || midnightWallets?.mnLace;
+      if (!initialAPI) {
         throw new Error('Lace Wallet not detected. Please install the Lace extension.');
       }
-
-      const initialAPI = midnightWallets.mnLace;
       
       // Connect to Preprod network
       const api = await initialAPI.connect('preprod');
