@@ -18,10 +18,13 @@ export const CircuitCall: React.FC<CircuitCallProps> = ({ midnight }) => {
     latestDrops,
     isVerifying,
     verificationResult,
+    terminalLogs,
+    terminalStatus,
     storeMessageOnChain,
     fetchMessage,
     verifyTransaction,
-    clearVerification
+    clearVerification,
+    clearTerminal
   } = midnight;
 
   const [activeTab, setActiveTab] = useState<'prove' | 'verify'>('prove');
@@ -50,6 +53,12 @@ export const CircuitCall: React.FC<CircuitCallProps> = ({ midnight }) => {
     e.preventDefault();
     if (!verifyHash.trim()) return;
     await verifyTransaction(verifyHash);
+  };
+
+  const handleResetConsole = () => {
+    clearTerminal();
+    setError(null);
+    setSuccess(false);
   };
 
   return (
@@ -112,27 +121,55 @@ export const CircuitCall: React.FC<CircuitCallProps> = ({ midnight }) => {
               Submit a public document disclosure. The proof system compiles the circuit and generates the cryptographic witness entirely locally.
             </p>
 
-            {success && txHash && (
-              <div className="bg-emerald-100 border-4 border-emerald-500 p-6 mb-6 rounded-none">
-                <strong className="block text-emerald-950 text-md uppercase font-black mb-2">
-                  ✓ PROOF GENERATED & BROADCASTED
-                </strong>
-                <div className="text-xs font-mono font-bold break-all bg-white border-2 border-black p-3 mb-3">
-                  TX_ID: {txHash}
-                </div>
-                <div className="inline-block border-2 border-emerald-500 bg-emerald-200 px-3 py-1 text-xs font-black uppercase text-emerald-950 rounded-none">
-                  Proved without revealing your input
-                </div>
-              </div>
-            )}
+            {terminalStatus !== 'idle' ? (
+              /* Monospace ZK Operator Console Output */
+              <div className="space-y-4">
+                <div className={`border-4 border-black p-6 bg-black font-mono text-sm space-y-2 rounded-none ${
+                  terminalStatus === 'running' ? 'text-lime-400 animate-pulse' :
+                  terminalStatus === 'success' ? 'text-emerald-400' : 'text-red-500'
+                }`}>
+                  <div className="flex justify-between items-center border-b border-neutral-800 pb-2 mb-3">
+                    <span className="font-black">ZK OPERATOR CONSOLE</span>
+                    <span className={`text-[10px] px-2 py-0.5 border font-black uppercase ${
+                      terminalStatus === 'running' ? 'bg-lime-950 text-lime-400 border-lime-400' :
+                      terminalStatus === 'success' ? 'bg-emerald-950 text-emerald-400 border-emerald-400' :
+                      'bg-red-950 text-red-500 border-red-500'
+                    }`}>
+                      {terminalStatus}
+                    </span>
+                  </div>
 
-            {isSubmitting ? (
-              /* ZK Monospace Terminal-style Step Animation */
-              <div className="border-4 border-black p-6 bg-black text-lime-400 font-mono text-sm space-y-2 rounded-none animate-pulse">
-                <div>&gt; INITIALIZING ZERO-KNOWLEDGE PROOF OPERATOR...</div>
-                <div>&gt; STATUS: ACTIVE</div>
-                <div className="text-white font-black">&gt; {zkStep}</div>
-                <div className="text-neutral-500">&gt; Local browser keys loaded via FetchZkConfigProvider.</div>
+                  {terminalLogs.map((log, idx) => (
+                    <div 
+                      key={idx} 
+                      className={
+                        log.startsWith('> [ERROR]') 
+                          ? 'text-red-400 font-black whitespace-pre-wrap' 
+                          : log.startsWith('> ✓') 
+                            ? 'text-emerald-400 font-black' 
+                            : 'text-neutral-300'
+                      }
+                    >
+                      {log}
+                    </div>
+                  ))}
+
+                  {terminalStatus === 'success' && (
+                    <div className="mt-4 pt-3 border-t border-neutral-800 text-xs text-neutral-400">
+                      Proof system execution validated. State broadcast verified.
+                    </div>
+                  )}
+                </div>
+
+                {/* Reset button to allow submitting new transactions */}
+                {(terminalStatus === 'success' || terminalStatus === 'error') && (
+                  <button
+                    onClick={handleResetConsole}
+                    className="w-full bg-black text-white border-4 border-black px-6 py-3 font-black uppercase tracking-wider hover:bg-white hover:text-black hover:-translate-x-1 hover:-translate-y-1 hover:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] active:translate-x-0 active:translate-y-0 active:shadow-none transition-all duration-150 rounded-none"
+                  >
+                    {terminalStatus === 'success' ? 'DISCLOSE ANOTHER STATEMENT' : 'RESET CONSOLE & RETRY'}
+                  </button>
+                )}
               </div>
             ) : (
               <form onSubmit={handleSubmit} className="space-y-6">

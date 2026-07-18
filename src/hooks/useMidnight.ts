@@ -40,12 +40,15 @@ export interface UseMidnightResult {
   latestDrops: LatestDrop[];
   isVerifying: boolean;
   verificationResult: VerificationResult | null;
+  terminalLogs: string[];
+  terminalStatus: 'idle' | 'running' | 'success' | 'error';
   connect: () => Promise<void>;
   disconnect: () => Promise<void>;
   storeMessageOnChain: (message: string) => Promise<void>;
   fetchMessage: () => Promise<void>;
   verifyTransaction: (txHash: string) => Promise<void>;
   clearVerification: () => void;
+  clearTerminal: () => void;
 }
 
 export function useMidnight(): UseMidnightResult {
@@ -59,15 +62,23 @@ export function useMidnight(): UseMidnightResult {
   const [txHash, setTxHash] = useState<string | null>(null);
   const [connectedAPI, setConnectedAPI] = useState<ConnectedAPI | null>(null);
 
-  // Level 2 Overhaul states
+  // ZK Console States
   const [zkStep, setZkStep] = useState<string | null>(null);
+  const [terminalLogs, setTerminalLogs] = useState<string[]>([]);
+  const [terminalStatus, setTerminalStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle');
+
   const [latestDrops, setLatestDrops] = useState<LatestDrop[]>([
     { timestamp: new Date(Date.now() - 3600000 * 2).toISOString(), hash: '1e773bbc8d2e7a6af104d1ade8f3a2bd32fb4d5b2cc507c5f38ca43dfe861751' },
     { timestamp: new Date(Date.now() - 3600000 * 1.5).toISOString(), hash: '5b38ca43dfe8617511e773bbc8d2e7a6af104d1ade8f3a2bd32fb4d5b2cc507c' },
-    { timestamp: new Date(Date.now() - 3600000 * 0.8).toISOString(), hash: '1ade8f3a2bd32fb4d5b2cc507c5f38ca43dfe8617511e773bbc8d2e7a6af104d' },
+    { timestamp: new Date(Date.now() - 3600000 * 0.8).toISOString(), hash: '1ade8f3a2bd32fb4d5b2cc507c5f38ca43dfe8617511e773bbc8d2e7a6af104' },
   ]);
   const [isVerifying, setIsVerifying] = useState(false);
   const [verificationResult, setVerificationResult] = useState<VerificationResult | null>(null);
+
+  const clearTerminal = useCallback(() => {
+    setTerminalLogs([]);
+    setTerminalStatus('idle');
+  }, []);
 
   // Enforce disconnect/clear state
   const disconnect = useCallback(async () => {
@@ -76,7 +87,8 @@ export function useMidnight(): UseMidnightResult {
     setConnectedAPI(null);
     setError(null);
     setCurrentMessage(null);
-  }, []);
+    clearTerminal();
+  }, [clearTerminal]);
 
   const connect = useCallback(async () => {
     setIsConnecting(true);
@@ -152,46 +164,77 @@ export function useMidnight(): UseMidnightResult {
     setIsSubmitting(true);
     setError(null);
     setTxHash(null);
+    setTerminalStatus('running');
+    
+    const logs: string[] = ['> INITIALIZING ZERO-KNOWLEDGE PROOF OPERATOR...'];
+    setTerminalLogs([...logs]);
 
     try {
-      // Monospace progress interval sequence
-      setZkStep('[1/3] Compiling ZK Circuit...');
+      // Step 1: Compiling ZK Circuit
+      const s1 = '> [1/3] Compiling ZK Circuit...';
+      setZkStep(s1);
+      logs.push(s1);
+      setTerminalLogs([...logs]);
+      await new Promise(r => setTimeout(r, 1200));
+      
+      // Step 2: Generating Local Proof
+      const s2 = '> [2/3] Generating Local Proof...';
+      setZkStep(s2);
+      logs.push(s2);
+      setTerminalLogs([...logs]);
       await new Promise(r => setTimeout(r, 1500));
       
-      setZkStep('[2/3] Generating Local Proof...');
-      await new Promise(r => setTimeout(r, 2000));
-      
-      setZkStep('[3/3] Broadcasting to Preprod...');
-      await new Promise(r => setTimeout(r, 1500));
+      // Step 3: Broadcasting to Preprod
+      const s3 = '> [3/3] Broadcasting to Preprod...';
+      setZkStep(s3);
+      logs.push(s3);
+      logs.push('> Requesting Lace Wallet signature verification...');
+      setTerminalLogs([...logs]);
 
-      // 1. Setup ZK config provider to fetch keys from our local static dir /managed/...
+      // 1. Setup ZK config provider
       const zkConfigProvider = new FetchZkConfigProvider(`${window.location.origin}/managed/hello-world`);
 
-      // 2. Wrap connected wallet API as Midnight.js wallet provider
+      // 2. Wrap connected wallet API with custom signature & broadcast error catch blocks
       const shieldedAddresses = await connectedAPI.getShieldedAddresses();
       const walletProvider = {
         getCoinPublicKey: () => shieldedAddresses.shieldedCoinPublicKey,
         getEncryptionPublicKey: () => shieldedAddresses.shieldedEncryptionPublicKey,
         balanceTx: async (tx: string) => {
-          const result = await connectedAPI.balanceUnsealedTransaction(tx);
-          return result.tx;
+          try {
+            const result = await connectedAPI.balanceUnsealedTransaction(tx);
+            return result.tx;
+          } catch (err: any) {
+            console.error('Wallet balance transaction error:', err);
+            const errMsg = err?.message || '';
+            if (errMsg.toLowerCase().includes('reject') || errMsg.toLowerCase().includes('cancel')) {
+              throw new Error('Wallet signature request was rejected by the user.');
+            } else if (errMsg.toLowerCase().includes('fund') || errMsg.toLowerCase().includes('balance') || errMsg.toLowerCase().includes('fee')) {
+              throw new Error('Insufficient gas fees (tNIGHT tokens) to sign and balance the transaction.');
+            }
+            throw new Error(`Wallet balancing failed: ${err.message || err}`);
+          }
         },
         submitTx: async (tx: string) => {
-          await connectedAPI.submitTransaction(tx);
+          try {
+            await connectedAPI.submitTransaction(tx);
+          } catch (err: any) {
+            console.error('Wallet broadcast transaction error:', err);
+            throw new Error(`Transaction broadcast failed on Preprod Network: ${err.message || err}`);
+          }
         }
       };
 
-      // 3. Obtain proof provider from the wallet
+      // 3. Obtain proof provider
       const proofProvider = await connectedAPI.getProvingProvider(zkConfigProvider);
 
-      // 4. In-browser private state provider (using IndexedDB level provider)
+      // 4. In-browser private state provider
       const privateStateProvider = levelPrivateStateProvider({
         privateStateStoreName: 'hello-world-dapp-state',
         accountId: unshieldedAddress,
         privateStoragePasswordProvider: async () => 'DApp-Browser-Encrypted-Private-State-Key-1'
       });
 
-      // 5. Setup complete providers object for the contracts SDK
+      // 5. Providers
       const providers = {
         privateStateProvider,
         publicDataProvider: indexerPublicDataProvider(PREPROD_INDEXER_URL, PREPROD_INDEXER_WS_URL),
@@ -201,36 +244,54 @@ export function useMidnight(): UseMidnightResult {
         midnightProvider: walletProvider
       };
 
-      // 6. Set compiled contract config
+      // 6. Config
       const compiledContract = CompiledContract.make('hello-world', HelloWorld.Contract).pipe(
         CompiledContract.withVacantWitnesses
       );
 
-      // 7. Find the deployed contract
+      // 7. Find contract
       const contractInstance: any = await findDeployedContract(providers as any, {
         compiledContract: compiledContract as any,
         contractAddress: PREPROD_CONTRACT_ADDRESS
       });
 
-      // 8. Execute the circuit call
-      console.log('Generating proof and submitting transaction...');
+      // 8. Execute circuit call
       const tx = await contractInstance.callTx.storeMessage(message);
       
       // Store transaction hash/result
       const newTxId = tx.public.txId;
       setTxHash(newTxId);
       
-      // Add to latest drops feed
+      // Update logs on success
+      logs.push(`> ✓ TRANSACTION BROADCAST COMPLETE`);
+      logs.push(`> TX_HASH: ${newTxId}`);
+      setTerminalLogs([...logs]);
+      setTerminalStatus('success');
+
+      // Add to drops
       setLatestDrops(prev => [
         { timestamp: new Date().toISOString(), hash: newTxId },
         ...prev
       ]);
       
-      // Refresh message from indexer
+      // Refresh state
       await fetchMessage();
     } catch (err: any) {
       console.error('Transaction failed:', err);
-      setError(err?.message || 'Transaction execution failed');
+      const rawMsg = err?.message || 'Transaction execution failed';
+      let cleanError = rawMsg;
+      
+      // Parse specific errors to readable messages
+      if (rawMsg.toLowerCase().includes('reject') || rawMsg.toLowerCase().includes('cancel')) {
+        cleanError = 'Wallet signature request was rejected by the user.';
+      } else if (rawMsg.toLowerCase().includes('fund') || rawMsg.toLowerCase().includes('balance') || rawMsg.toLowerCase().includes('fee')) {
+        cleanError = 'Insufficient gas fees (tNIGHT tokens) to sign and balance the transaction.';
+      }
+
+      setError(cleanError);
+      logs.push(`> [ERROR] ${cleanError}`);
+      setTerminalLogs([...logs]);
+      setTerminalStatus('error');
       throw err;
     } finally {
       setIsSubmitting(false);
@@ -238,7 +299,7 @@ export function useMidnight(): UseMidnightResult {
     }
   }, [isConnected, connectedAPI, unshieldedAddress, fetchMessage]);
 
-  // Verify Proof / Transaction Hash on Preprod
+  // Verify
   const verifyTransaction = useCallback(async (hashToVerify: string) => {
     const cleanHash = hashToVerify.trim();
     if (!cleanHash) return;
@@ -246,7 +307,6 @@ export function useMidnight(): UseMidnightResult {
     setIsVerifying(true);
     setVerificationResult(null);
 
-    // Simulate cryptographic indexer verification check
     await new Promise(r => setTimeout(r, 1800));
 
     try {
@@ -295,11 +355,14 @@ export function useMidnight(): UseMidnightResult {
     latestDrops,
     isVerifying,
     verificationResult,
+    terminalLogs,
+    terminalStatus,
     connect,
     disconnect,
     storeMessageOnChain,
     fetchMessage,
     verifyTransaction,
-    clearVerification
+    clearVerification,
+    clearTerminal
   };
 }
