@@ -44,10 +44,13 @@
     "@midnight-ntwrk/wallet-sdk-hd": "3.0.1",
     "@midnight-ntwrk/wallet-sdk-shielded": "2.1.0",
     "@midnight-ntwrk/wallet-sdk-unshielded-wallet": "2.1.0",
+    "@tailwindcss/postcss": "^4.3.3",
     "next": "^16.2.10",
+    "postcss": "^8.5.19",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "rxjs": "^7.8.2",
+    "tailwindcss": "^4.3.3",
     "ws": "^8.20.0"
   },
   "devDependencies": {
