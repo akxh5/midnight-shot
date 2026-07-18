@@ -87,6 +87,7 @@ export function useMidnight(): UseMidnightResult {
     setConnectedAPI(null);
     setError(null);
     setCurrentMessage(null);
+    localStorage.removeItem('midnight_reconnect_lace');
     clearTerminal();
   }, [clearTerminal]);
 
@@ -120,14 +121,35 @@ export function useMidnight(): UseMidnightResult {
       const { unshieldedAddress: address } = await api.getUnshieldedAddress();
       setUnshieldedAddress(address);
       setIsConnected(true);
+      
+      // Save reconnection key
+      localStorage.setItem('midnight_reconnect_lace', 'true');
     } catch (err: any) {
       console.error('Wallet connection error:', err);
-      setError(err?.message || 'Failed to connect to Lace Wallet');
+      const errMsg = err?.message || '';
+      let cleanErr = 'Failed to connect to Lace Wallet';
+      if (errMsg.toLowerCase().includes('reject') || errMsg.toLowerCase().includes('cancel') || errMsg.toLowerCase().includes('deny')) {
+        cleanErr = 'Connection request was rejected or closed by the user.';
+      } else if (errMsg.toLowerCase().includes('network') || errMsg.toLowerCase().includes('preprod')) {
+        cleanErr = 'Network mismatch. Please configure Lace wallet extension to Preprod.';
+      }
+      setError(cleanErr);
       await disconnect();
     } finally {
       setIsConnecting(false);
     }
   }, [disconnect]);
+
+  // Auto-reconnect check on mount
+  useEffect(() => {
+    const shouldReconnect = localStorage.getItem('midnight_reconnect_lace') === 'true';
+    if (shouldReconnect) {
+      const timer = setTimeout(() => {
+        connect();
+      }, 600);
+      return () => clearTimeout(timer);
+    }
+  }, [connect]);
 
   // Fetch public contract message state from indexer
   const fetchMessage = useCallback(async () => {
