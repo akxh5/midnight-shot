@@ -20,10 +20,10 @@ Midnight Drop is a decentralized application that lets users submit cryptographi
 
 ```mermaid
 flowchart TD
-    subgraph BROWSER["🌐 Browser — Client Side"]
+    subgraph BROWSER["Browser - Client Side"]
         direction TB
-        LACE["🦋 Lace Wallet Extension\nwindow.midnight.lace"]
-        subgraph APP["Next.js App — React"]
+        LACE["Lace Wallet Extension\nwindow.midnight.lace"]
+        subgraph APP["Next.js App - React"]
             direction LR
             WC["WalletConnect.tsx\n(connect / disconnect)"]
             CC["CircuitCall.tsx\n(prove / verify / drops feed)"]
@@ -31,28 +31,28 @@ flowchart TD
             WC --> HOOK
             CC --> HOOK
         end
-        ZK["📦 /public/managed/\nstoreMessage.prover\nstoreMessage.verifier\n*.zkir keys"]
+        ZK["/public/managed/\nstoreMessage.prover\nstoreMessage.verifier\n*.zkir keys"]
         LACE <-->|"getProvingProvider()\nbalanceTx() / submitTx()"| HOOK
         ZK -->|"FetchZkConfigProvider"| HOOK
     end
 
-    subgraph MIDNIGHT["⛓️ Midnight Network — Preprod"]
-        IDX["🔍 Indexer\nGraphQL / WebSocket\nqueryContractState()"]
-        CHAIN["📋 Blockchain Ledger\nContract Address:\n1e773bbc8d2e..."]
+    subgraph MIDNIGHT["Midnight Network - Preprod"]
+        IDX["Indexer\nGraphQL / WebSocket\nqueryContractState()"]
+        CHAIN["Blockchain Ledger\nContract Address:\n1e773bbc8d2e..."]
         IDX <-->|"State sync"| CHAIN
     end
 
     HOOK <-->|"indexerPublicDataProvider"| IDX
     HOOK -->|"Signed ZK Transaction"| CHAIN
 
-    style BROWSER fill:#f9f9f9,stroke:#000,stroke-width:3px,color:#000
-    style MIDNIGHT fill:#f0f0f0,stroke:#000,stroke-width:3px,color:#000
-    style LACE fill:#fff,stroke:#000,stroke-width:2px
-    style APP fill:#fff,stroke:#000,stroke-width:2px
-    style ZK fill:#fff,stroke:#000,stroke-width:2px
+    style BROWSER fill:none,stroke:#000,stroke-width:3px,color:#000
+    style MIDNIGHT fill:none,stroke:#000,stroke-width:3px,color:#000
+    style LACE fill:none,stroke:#000,stroke-width:2px
+    style APP fill:none,stroke:#000,stroke-width:2px
+    style ZK fill:none,stroke:#000,stroke-width:2px
     style HOOK fill:#000,stroke:#000,color:#fff
-    style IDX fill:#fff,stroke:#000,stroke-width:2px
-    style CHAIN fill:#fff,stroke:#000,stroke-width:2px
+    style IDX fill:none,stroke:#000,stroke-width:2px
+    style CHAIN fill:none,stroke:#000,stroke-width:2px
 ```
 
 ### ZK Proof Data Flow
@@ -72,23 +72,23 @@ sequenceDiagram
     UI->>Hook: storeMessageOnChain(message)
     Note over Hook: [1/3] Compiling ZK Circuit...
     Hook->>ZKP: Load storeMessage.prover key
-    ZKP-->>Hook: Prover key loaded ✓
+    ZKP-->>Hook: Prover key loaded
 
     Note over Hook: [2/3] Generating Local Proof...
     Hook->>Lace: getProvingProvider(zkConfigProvider)
-    Lace-->>Hook: ProvingProvider ready ✓
+    Lace-->>Hook: ProvingProvider ready
     Hook->>Lace: balanceUnsealedTransaction(tx)
-    Lace-->>Hook: Balanced & signed tx ✓
+    Lace-->>Hook: Balanced & signed tx
 
     Note over Hook: [3/3] Broadcasting to Preprod...
     Hook->>Lace: submitTransaction(tx)
     Lace->>Net: Broadcast ZK proof tx
-    Net-->>Hook: TX_ID confirmed ✓
+    Net-->>Hook: TX_ID confirmed
 
     Hook->>Net: queryContractState()
-    Net-->>Hook: Updated ledger.message ✓
+    Net-->>Hook: Updated ledger.message
     Hook-->>UI: txHash + currentMessage
-    UI-->>User: "Proved without revealing your input" ✅
+    UI-->>User: "Proved without revealing your input"
 
     Note over User,Net: Private input NEVER leaves the browser
 ```
