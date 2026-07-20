@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { InitialAPI, ConnectedAPI } from '@midnight-ntwrk/dapp-connector-api';
 import { FetchZkConfigProvider } from '@midnight-ntwrk/midnight-js-fetch-zk-config-provider';
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
@@ -12,6 +12,32 @@ import * as HelloWorld from '../../contracts/managed/hello-world/contract/index.
 const PREPROD_CONTRACT_ADDRESS = '1e773bbc8d2e7a6af104d1ade8f3a2bd32fb4d5b2cc507c5f38ca43dfe861751';
 const PREPROD_INDEXER_URL = 'https://indexer.preprod.midnight.network/api/v4/graphql';
 const PREPROD_INDEXER_WS_URL = 'wss://indexer.preprod.midnight.network/api/v4/graphql/ws';
+
+// Globalizing the indexer provider prevents recreating websocket connections which causes orphaned streams and MaxListenersExceededWarnings.
+let globalPublicDataProvider: any = null;
+const getPublicDataProvider = () => {
+  if (!globalPublicDataProvider) {
+    globalPublicDataProvider = indexerPublicDataProvider(PREPROD_INDEXER_URL, PREPROD_INDEXER_WS_URL);
+  }
+  return globalPublicDataProvider;
+};
+
+// Timeout wrapper to prevent hanging promises
+const withTimeout = <T,>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> => {
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      reject(new Error(errorMessage));
+    }, timeoutMs);
+
+    promise.then((res) => {
+      clearTimeout(timeoutId);
+      resolve(res);
+    }).catch((err) => {
+      clearTimeout(timeoutId);
+      reject(err);
+    });
+  });
+};
 
 export interface LatestDrop {
   timestamp: string;
@@ -62,6 +88,8 @@ export function useMidnight(): UseMidnightResult {
   const [txHash, setTxHash] = useState<string | null>(null);
   const [connectedAPI, setConnectedAPI] = useState<ConnectedAPI | null>(null);
 
+  const isConnectingRef = useRef(false);
+
   // ZK Console States
   const [zkStep, setZkStep] = useState<string | null>(null);
   const [terminalLogs, setTerminalLogs] = useState<string[]>([]);
@@ -92,6 +120,9 @@ export function useMidnight(): UseMidnightResult {
   }, [clearTerminal]);
 
   const connect = useCallback(async () => {
+    if (isConnectingRef.current) return;
+    
+    isConnectingRef.current = true;
     setIsConnecting(true);
     setError(null);
     try {
@@ -136,26 +167,32 @@ export function useMidnight(): UseMidnightResult {
       setError(cleanErr);
       await disconnect();
     } finally {
+      isConnectingRef.current = false;
       setIsConnecting(false);
     }
   }, [disconnect]);
 
-  // Auto-reconnect check on mount
+  // Auto-reconnect check on mount with strict cleanup
   useEffect(() => {
+    let timer: NodeJS.Timeout;
     const shouldReconnect = localStorage.getItem('midnight_reconnect_lace') === 'true';
+    
     if (shouldReconnect) {
-      const timer = setTimeout(() => {
+      timer = setTimeout(() => {
         connect();
       }, 600);
-      return () => clearTimeout(timer);
     }
+    
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
   }, [connect]);
 
   // Fetch public contract message state from indexer
   const fetchMessage = useCallback(async () => {
     setIsLoadingMessage(true);
     try {
-      const publicDataProvider = indexerPublicDataProvider(PREPROD_INDEXER_URL, PREPROD_INDEXER_WS_URL);
+      const publicDataProvider = getPublicDataProvider();
       const contractState = await publicDataProvider.queryContractState(PREPROD_CONTRACT_ADDRESS);
       if (contractState && contractState.data) {
         const ledgerState = HelloWorld.ledger(contractState.data);
@@ -173,9 +210,17 @@ export function useMidnight(): UseMidnightResult {
     }
   }, []);
 
-  // Run initial fetch of the on-chain message state
+  // Run initial fetch of the on-chain message state with cleanup
   useEffect(() => {
-    fetchMessage();
+    let isMounted = true;
+    
+    if (isMounted) {
+      fetchMessage();
+    }
+    
+    return () => {
+      isMounted = false;
+    };
   }, [fetchMessage]);
 
   const storeMessageOnChain = useCallback(async (message: string) => {
@@ -216,19 +261,25 @@ export function useMidnight(): UseMidnightResult {
       // 1. Setup ZK config provider
       const zkConfigProvider = new FetchZkConfigProvider(`${window.location.origin}/managed/hello-world`);
 
-      // 2. Wrap connected wallet API with custom signature & broadcast error catch blocks
+      // 2. Wrap connected wallet API with custom signature & broadcast error catch blocks and TIMEOUTS
       const shieldedAddresses = await connectedAPI.getShieldedAddresses();
       const walletProvider = {
         getCoinPublicKey: () => shieldedAddresses.shieldedCoinPublicKey,
         getEncryptionPublicKey: () => shieldedAddresses.shieldedEncryptionPublicKey,
         balanceTx: async (tx: string) => {
           try {
-            const result = await connectedAPI.balanceUnsealedTransaction(tx);
+            const result = await withTimeout(
+              connectedAPI.balanceUnsealedTransaction(tx),
+              30000,
+              'Wallet connection timed out. Please refresh.'
+            );
             return result.tx;
           } catch (err: any) {
             console.error('Wallet balance transaction error:', err);
             const errMsg = err?.message || '';
-            if (errMsg.toLowerCase().includes('reject') || errMsg.toLowerCase().includes('cancel')) {
+            if (errMsg.toLowerCase().includes('time')) {
+              throw new Error('Wallet connection timed out. Please refresh.');
+            } else if (errMsg.toLowerCase().includes('reject') || errMsg.toLowerCase().includes('cancel')) {
               throw new Error('Wallet signature request was rejected by the user.');
             } else if (errMsg.toLowerCase().includes('fund') || errMsg.toLowerCase().includes('balance') || errMsg.toLowerCase().includes('fee')) {
               throw new Error('Insufficient gas fees (tNIGHT tokens) to sign and balance the transaction.');
@@ -238,9 +289,17 @@ export function useMidnight(): UseMidnightResult {
         },
         submitTx: async (tx: string) => {
           try {
-            await connectedAPI.submitTransaction(tx);
+            await withTimeout(
+              connectedAPI.submitTransaction(tx),
+              30000,
+              'Wallet connection timed out. Please refresh.'
+            );
           } catch (err: any) {
             console.error('Wallet broadcast transaction error:', err);
+            const errMsg = err?.message || '';
+            if (errMsg.toLowerCase().includes('time')) {
+              throw new Error('Wallet connection timed out. Please refresh.');
+            }
             throw new Error(`Transaction broadcast failed on Preprod Network: ${err.message || err}`);
           }
         }
@@ -259,7 +318,7 @@ export function useMidnight(): UseMidnightResult {
       // 5. Providers
       const providers = {
         privateStateProvider,
-        publicDataProvider: indexerPublicDataProvider(PREPROD_INDEXER_URL, PREPROD_INDEXER_WS_URL),
+        publicDataProvider: getPublicDataProvider(),
         zkConfigProvider,
         proofProvider,
         walletProvider,
@@ -277,7 +336,7 @@ export function useMidnight(): UseMidnightResult {
         contractAddress: PREPROD_CONTRACT_ADDRESS
       });
 
-      // 8. Execute circuit call
+      // 8. Execute circuit call - This will utilize our timeout-wrapped walletProvider
       const tx = await contractInstance.callTx.storeMessage(message);
       
       // Store transaction hash/result
@@ -308,13 +367,14 @@ export function useMidnight(): UseMidnightResult {
         cleanError = 'Wallet signature request was rejected by the user.';
       } else if (rawMsg.toLowerCase().includes('fund') || rawMsg.toLowerCase().includes('balance') || rawMsg.toLowerCase().includes('fee')) {
         cleanError = 'Insufficient gas fees (tNIGHT tokens) to sign and balance the transaction.';
+      } else if (rawMsg.toLowerCase().includes('time')) {
+        cleanError = 'Wallet connection timed out. Please refresh.';
       }
 
       setError(cleanError);
       logs.push(`> [ERROR] ${cleanError}`);
       setTerminalLogs([...logs]);
       setTerminalStatus('error');
-      throw err;
     } finally {
       setIsSubmitting(false);
       setZkStep(null);
