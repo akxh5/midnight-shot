@@ -33,28 +33,15 @@ let globalUnshieldedAddress: string | null = null;
 // 2. TIMEOUT WRAPPER FOR DETERMINISTIC FAILURE
 // ==========================================
 const withTimeout = <T,>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> => {
-  return new Promise((resolve, reject) => {
-    let isFinished = false;
-    const timeoutId = setTimeout(() => {
-      if (!isFinished) {
-        isFinished = true;
-        reject(new Error(errorMessage));
-      }
+  let timeoutId: NodeJS.Timeout;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(errorMessage));
     }, timeoutMs);
+  });
 
-    promise.then((res) => {
-      if (!isFinished) {
-        isFinished = true;
-        clearTimeout(timeoutId);
-        resolve(res);
-      }
-    }).catch((err) => {
-      if (!isFinished) {
-        isFinished = true;
-        clearTimeout(timeoutId);
-        reject(err);
-      }
-    });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    clearTimeout(timeoutId);
   });
 };
 
@@ -288,7 +275,6 @@ export function useMidnight(): UseMidnightResult {
       const s1 = '> [1/4] Compiling ZK Circuit...';
       setZkStep(s1);
       updateLogs(s1);
-      await new Promise(r => setTimeout(r, 800));
       
       const zkConfigProvider = new FetchZkConfigProvider(`${window.location.origin}/managed/hello-world`);
 
@@ -312,24 +298,37 @@ export function useMidnight(): UseMidnightResult {
 
       const shieldedAddresses = await globalConnectedAPI.getShieldedAddresses();
       
-      // Singleton wallet provider wrapper with timeouts
+      // Singleton wallet provider wrapper with timeouts and deep payload inspection
       const walletProvider = {
         getCoinPublicKey: () => shieldedAddresses.shieldedCoinPublicKey,
         getEncryptionPublicKey: () => shieldedAddresses.shieldedEncryptionPublicKey,
         balanceTx: async (tx: string) => {
+          console.log('\n=======================================');
+          console.log('[WALLET API DETECTIVE] balanceUnsealedTransaction intercepted');
+          console.log('Target Network: Preprod');
+          console.log('TX Payload Size:', tx.length, 'bytes');
+          console.log('TX Payload Head:', tx.substring(0, 100) + '...');
+          console.log('=======================================\n');
+
           try {
             const result = await withTimeout(
               globalConnectedAPI!.balanceUnsealedTransaction(tx),
               45000, // Generous 45s timeout for complex ZK balancing and user approval
               'Wallet signature request timed out.'
             );
+            console.log('[WALLET API DETECTIVE] balanceUnsealedTransaction SUCCESS');
             return result.tx;
           } catch (err: any) {
-            console.error('Wallet balance transaction error:', err);
+            console.error('[WALLET API DETECTIVE] balanceUnsealedTransaction ERROR:', err);
             throw err;
           }
         },
         submitTx: async (tx: string) => {
+          console.log('\n=======================================');
+          console.log('[WALLET API DETECTIVE] submitTransaction intercepted');
+          console.log('TX Payload Size:', tx.length, 'bytes');
+          console.log('=======================================\n');
+
           try {
             updateLogs('> [4/4] Broadcasting to Preprod Network...');
             setZkStep('> [4/4] Broadcasting to Preprod Network...');
@@ -339,8 +338,9 @@ export function useMidnight(): UseMidnightResult {
               30000,
               'Transaction broadcast timed out.'
             );
+            console.log('[WALLET API DETECTIVE] submitTransaction SUCCESS');
           } catch (err: any) {
-            console.error('Wallet broadcast transaction error:', err);
+            console.error('[WALLET API DETECTIVE] submitTransaction ERROR:', err);
             throw err;
           }
         }
@@ -375,8 +375,13 @@ export function useMidnight(): UseMidnightResult {
         contractAddress: PREPROD_CONTRACT_ADDRESS
       });
 
-      // STATE: EXECUTE & BROADCAST
-      const tx = await contractInstance.callTx.storeMessage(message);
+      // STATE: EXECUTE & BROADCAST WITH GLOBAL TIMEOUT
+      // We wrap the ENTIRE contract call in a timeout. If proof generation or wallet signing hangs, this breaks the deadlock.
+      const tx: any = await withTimeout(
+        contractInstance.callTx.storeMessage(message),
+        90000, // 90 seconds max for local ZK proving + wallet signature
+        'The ZK generation or wallet signature process timed out. Please hard refresh and try again.'
+      );
       
       // STATE: SUCCESS
       const newTxId = tx.public.txId;
@@ -403,7 +408,7 @@ export function useMidnight(): UseMidnightResult {
       } else if (rawMsg.toLowerCase().includes('fund') || rawMsg.toLowerCase().includes('balance') || rawMsg.toLowerCase().includes('fee') || rawMsg.toLowerCase().includes('value')) {
         cleanError = 'Insufficient gas fees (tNIGHT tokens) to sign and balance the transaction.';
       } else if (rawMsg.toLowerCase().includes('time')) {
-        cleanError = 'Wallet connection timed out. Please hard refresh the app.';
+        cleanError = 'Transaction timed out. The Lace extension or ZK provider may be unresponsive.';
       }
 
       setError(cleanError);
