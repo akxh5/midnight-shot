@@ -292,21 +292,17 @@ export function useMidnight(): UseMidnightResult {
       
       const zkConfigProvider = new FetchZkConfigProvider(`${window.location.origin}/managed/hello-world`);
 
-      // STATE: EXPLICIT WALLET HANDSHAKE
-      const s2 = '> [2/4] Executing Explicit Wallet Handshake...';
+      // STATE: VERIFYING WALLET SESSION
+      const s2 = '> [2/4] Verifying Active Wallet Session...';
       setZkStep(s2);
       updateLogs(s2);
       
-      if (!window.midnight) throw new Error('Lace Wallet extension missing.');
-      const initialAPI = window.midnight.lace || window.midnight.mnLace;
-      if (!initialAPI) throw new Error('Lace API missing.');
+      if (!globalConnectedAPI) {
+        throw new Error('Active wallet session lost. Please reconnect your wallet.');
+      }
       
-      // Explicit connection check to revive bridge right before signature
-      globalConnectedAPI = await withTimeout(
-        initialAPI.connect('preprod'),
-        15000,
-        'Wallet handshake timed out.'
-      );
+      // Note: We bypass calling initialAPI.connect() again, and directly use the 
+      // globalConnectedAPI that was instantiated during the initial user-triggered connection.
 
       // STATE: AWAITING SIGNATURE
       const s3 = '> [3/4] Generating Proof & Awaiting Wallet Signature...';
