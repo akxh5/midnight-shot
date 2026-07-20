@@ -20,80 +20,11 @@ Midnight Drop is a decentralized application that lets users submit cryptographi
 
 ### System Architecture Diagram
 
-```mermaid
-flowchart TD
-    subgraph BROWSER["Browser - Client Side"]
-        direction TB
-        LACE["Lace Wallet Extension\nwindow.midnight.lace"]
-        subgraph APP["Next.js App - React"]
-            direction LR
-            WC["WalletConnect.tsx\n(connect / disconnect)"]
-            CC["CircuitCall.tsx\n(prove / verify / drops feed)"]
-            HOOK["useMidnight.ts\n(Custom Hook)"]
-            WC --> HOOK
-            CC --> HOOK
-        end
-        ZK["/public/managed/\nstoreMessage.prover\nstoreMessage.verifier\n*.zkir keys"]
-        LACE <-->|"getProvingProvider()\nbalanceTx() / submitTx()"| HOOK
-        ZK -->|"FetchZkConfigProvider"| HOOK
-    end
-
-    subgraph MIDNIGHT["Midnight Network - Preprod"]
-        IDX["Indexer\nGraphQL / WebSocket\nqueryContractState()"]
-        CHAIN["Blockchain Ledger\nContract Address:\n1e773bbc8d2e..."]
-        IDX <-->|"State sync"| CHAIN
-    end
-
-    HOOK <-->|"indexerPublicDataProvider"| IDX
-    HOOK -->|"Signed ZK Transaction"| CHAIN
-
-    style BROWSER fill:none,stroke:#000,stroke-width:3px,color:#000
-    style MIDNIGHT fill:none,stroke:#000,stroke-width:3px,color:#000
-    style LACE fill:none,stroke:#000,stroke-width:2px
-    style APP fill:none,stroke:#000,stroke-width:2px
-    style ZK fill:none,stroke:#000,stroke-width:2px
-    style HOOK fill:#000,stroke:#000,color:#fff
-    style IDX fill:none,stroke:#000,stroke-width:2px
-    style CHAIN fill:none,stroke:#000,stroke-width:2px
-```
+![System Architecture](./public/system_architecture.jpg)
 
 ### Cryptographic ZK Proof Data Flow Sequence
 
-```mermaid
-sequenceDiagram
-    actor User
-    participant UI as CircuitCall.tsx
-    participant Hook as useMidnight Hook
-    participant ZKP as FetchZkConfigProvider<br/>(public/managed/)
-    participant Lace as Lace Wallet
-    participant Net as Midnight Preprod
-
-    User->>UI: Types disclosure message
-    User->>UI: Clicks "Generate Proof & Disclose"
-
-    UI->>Hook: storeMessageOnChain(message)
-    Note over Hook: [1/3] Compiling ZK Circuit...
-    Hook->>ZKP: Load storeMessage.prover key
-    ZKP-->>Hook: Prover key loaded
-
-    Note over Hook: [2/3] Generating Local Proof...
-    Hook->>Lace: getProvingProvider(zkConfigProvider)
-    Lace-->>Hook: ProvingProvider ready
-    Hook->>Lace: balanceUnsealedTransaction(tx)
-    Lace-->>Hook: Balanced & signed tx
-
-    Note over Hook: [3/3] Broadcasting to Preprod...
-    Hook->>Lace: submitTransaction(tx)
-    Lace->>Net: Broadcast ZK proof tx
-    Net-->>Hook: TX_ID confirmed
-
-    Hook->>Net: queryContractState()
-    Net-->>Hook: Updated ledger.message
-    Hook-->>UI: txHash + currentMessage
-    UI-->>User: "Proved without revealing your input"
-
-    Note over User,Net: Private input NEVER leaves the browser
-```
+![ZK Proof Sequence](./public/sequence_diagram.jpg)
 
 
 ## Privacy Model
