@@ -14,20 +14,72 @@ const PREPROD_INDEXER_URL = 'https://indexer.preprod.midnight.network/api/v4/gra
 const PREPROD_INDEXER_WS_URL = 'wss://indexer.preprod.midnight.network/api/v4/graphql/ws';
 
 // ==========================================
-// 1. STRICT SINGLETON PATTERN FOR PROVIDERS
+// 1. STRICT SINGLETON PATTERN FOR ALL PROVIDERS
 // ==========================================
+// Every provider that opens a stream to the Lace extension or a WebSocket must be
+// instantiated ONCE per wallet session. Re-creating them on every transaction call
+// registers duplicate event listeners, causing MaxListenersExceededWarning and
+// ObjectMultiplex orphaned-stream errors.
 let globalPublicDataProvider: any = null;
 const getPublicDataProvider = () => {
-  if (typeof window === 'undefined') return null; // Strict Client-Side Gating
+  if (typeof window === 'undefined') return null;
   if (!globalPublicDataProvider) {
     globalPublicDataProvider = indexerPublicDataProvider(PREPROD_INDEXER_URL, PREPROD_INDEXER_WS_URL);
   }
   return globalPublicDataProvider;
 };
 
-// We also cache the connected API specifically to prevent recreating multiple hooks/listeners
 let globalConnectedAPI: ConnectedAPI | null = null;
 let globalUnshieldedAddress: string | null = null;
+
+// These three are also singletons — they each register listeners on the Lace bridge
+let globalZkConfigProvider: any = null;
+let globalProofProvider: any = null;
+let globalPrivateStateProvider: any = null;
+
+// Lazily initialise the three heavy providers after wallet connects.
+// Subsequent calls return the already-created instances.
+const getSessionProviders = async () => {
+  if (!globalConnectedAPI || !globalUnshieldedAddress) {
+    throw new Error('Wallet not connected — cannot initialise providers.');
+  }
+  if (!globalZkConfigProvider) {
+    globalZkConfigProvider = new FetchZkConfigProvider(
+      typeof window !== 'undefined'
+        ? `${window.location.origin}/managed/hello-world`
+        : ''
+    );
+  }
+  if (!globalProofProvider) {
+    const { dappConnectorProofProvider } = await import('@midnight-ntwrk/midnight-js-dapp-connector-proof-provider');
+    globalProofProvider = await dappConnectorProofProvider(
+      globalConnectedAPI,
+      globalZkConfigProvider,
+      undefined as any
+    );
+  }
+  if (!globalPrivateStateProvider) {
+    globalPrivateStateProvider = levelPrivateStateProvider({
+      privateStateStoreName: 'hello-world-dapp-state',
+      accountId: globalUnshieldedAddress,
+      privateStoragePasswordProvider: async () => 'DApp-Browser-Encrypted-Private-State-Key-1',
+    });
+  }
+  return {
+    zkConfigProvider: globalZkConfigProvider,
+    proofProvider: globalProofProvider,
+    privateStateProvider: globalPrivateStateProvider,
+  };
+};
+
+// Tear down all session-scoped singletons on disconnect so the next connect starts clean.
+const clearSessionProviders = () => {
+  globalConnectedAPI = null;
+  globalUnshieldedAddress = null;
+  globalZkConfigProvider = null;
+  globalProofProvider = null;
+  globalPrivateStateProvider = null;
+};
 
 // ==========================================
 // 2. TIMEOUT WRAPPER FOR DETERMINISTIC FAILURE
@@ -116,8 +168,9 @@ export function useMidnight(): UseMidnightResult {
   const disconnect = useCallback(async () => {
     setIsConnected(false);
     setUnshieldedAddress(null);
-    globalConnectedAPI = null;
-    globalUnshieldedAddress = null;
+    // Tear down ALL session-scoped singletons so re-connecting starts with a clean slate
+    // and no orphaned stream listeners accumulate on the Lace bridge.
+    clearSessionProviders();
     setError(null);
     setCurrentMessage(null);
     if (typeof window !== 'undefined') {
@@ -271,24 +324,25 @@ export function useMidnight(): UseMidnightResult {
     setTerminalLogs([...currentLogs]);
 
     try {
-      // STATE: COMPILING
+      // STATE: COMPILING — get/reuse singleton providers (zero new listeners registered)
       const s1 = '> [1/4] Compiling ZK Circuit...';
       setZkStep(s1);
       updateLogs(s1);
-      
-      const zkConfigProvider = new FetchZkConfigProvider(`${window.location.origin}/managed/hello-world`);
 
       // STATE: VERIFYING WALLET SESSION
       const s2 = '> [2/4] Verifying Active Wallet Session...';
       setZkStep(s2);
       updateLogs(s2);
-      
+
       if (!globalConnectedAPI) {
         throw new Error('Active wallet session lost. Please reconnect your wallet.');
       }
-      
-      // Note: We bypass calling initialAPI.connect() again, and directly use the 
-      // globalConnectedAPI that was instantiated during the initial user-triggered connection.
+
+      // Retrieve (or lazily initialise) the three session-scoped singleton providers.
+      // getSessionProviders() guarantees that dappConnectorProofProvider, zkConfigProvider,
+      // and privateStateProvider are each created at most once per wallet session,
+      // preventing the duplicate listener registration that caused MaxListenersExceededWarning.
+      const { zkConfigProvider, proofProvider, privateStateProvider } = await getSessionProviders();
 
       // STATE: AWAITING SIGNATURE
       const s3 = '> [3/4] Generating Proof & Awaiting Wallet Signature...';
@@ -297,63 +351,39 @@ export function useMidnight(): UseMidnightResult {
       updateLogs('> Requesting Lace Wallet signature verification...');
 
       const shieldedAddresses = await globalConnectedAPI.getShieldedAddresses();
-      
-      // Singleton wallet provider wrapper with timeouts and deep payload inspection
+
+      // walletProvider is a thin stateless wrapper — safe to create per-call
       const walletProvider = {
         getCoinPublicKey: () => shieldedAddresses.shieldedCoinPublicKey,
         getEncryptionPublicKey: () => shieldedAddresses.shieldedEncryptionPublicKey,
         balanceTx: async (tx: string) => {
-          console.log('\n=======================================');
-          console.log('[WALLET API DETECTIVE] balanceUnsealedTransaction intercepted');
-          console.log('Target Network: Preprod');
-          console.log('TX Payload Size:', tx.length, 'bytes');
-          console.log('TX Payload Head:', tx.substring(0, 100) + '...');
-          console.log('=======================================\n');
-
           try {
             const result = await withTimeout(
               globalConnectedAPI!.balanceUnsealedTransaction(tx),
-              45000, // Generous 45s timeout for complex ZK balancing and user approval
+              45000,
               'Wallet signature request timed out.'
             );
-            console.log('[WALLET API DETECTIVE] balanceUnsealedTransaction SUCCESS');
             return result.tx;
           } catch (err: any) {
-            console.error('[WALLET API DETECTIVE] balanceUnsealedTransaction ERROR:', err);
+            console.error('balanceUnsealedTransaction error:', err);
             throw err;
           }
         },
         submitTx: async (tx: string) => {
-          console.log('\n=======================================');
-          console.log('[WALLET API DETECTIVE] submitTransaction intercepted');
-          console.log('TX Payload Size:', tx.length, 'bytes');
-          console.log('=======================================\n');
-
           try {
             updateLogs('> [4/4] Broadcasting to Preprod Network...');
             setZkStep('> [4/4] Broadcasting to Preprod Network...');
-            
             await withTimeout(
               globalConnectedAPI!.submitTransaction(tx),
               30000,
               'Transaction broadcast timed out.'
             );
-            console.log('[WALLET API DETECTIVE] submitTransaction SUCCESS');
           } catch (err: any) {
-            console.error('[WALLET API DETECTIVE] submitTransaction ERROR:', err);
+            console.error('submitTransaction error:', err);
             throw err;
           }
-        }
+        },
       };
-
-      const { dappConnectorProofProvider } = await import('@midnight-ntwrk/midnight-js-dapp-connector-proof-provider');
-      const proofProvider = await dappConnectorProofProvider(globalConnectedAPI, zkConfigProvider, undefined as any);
-      
-      const privateStateProvider = levelPrivateStateProvider({
-        privateStateStoreName: 'hello-world-dapp-state',
-        accountId: globalUnshieldedAddress,
-        privateStoragePasswordProvider: async () => 'DApp-Browser-Encrypted-Private-State-Key-1'
-      });
 
       const publicDataProvider = getPublicDataProvider();
       if (!publicDataProvider) throw new Error('Public Data Provider not initialized');
@@ -364,7 +394,7 @@ export function useMidnight(): UseMidnightResult {
         zkConfigProvider,
         proofProvider,
         walletProvider,
-        midnightProvider: walletProvider
+        midnightProvider: walletProvider,
       };
 
       const compiledContract = CompiledContract.make('hello-world', HelloWorld.Contract).pipe(
@@ -373,21 +403,20 @@ export function useMidnight(): UseMidnightResult {
 
       const contractInstance: any = await findDeployedContract(providers as any, {
         compiledContract: compiledContract as any,
-        contractAddress: PREPROD_CONTRACT_ADDRESS
+        contractAddress: PREPROD_CONTRACT_ADDRESS,
       });
 
-      // STATE: EXECUTE & BROADCAST WITH GLOBAL TIMEOUT
-      // We wrap the ENTIRE contract call in a timeout. If proof generation or wallet signing hangs, this breaks the deadlock.
+      // STATE: EXECUTE & BROADCAST — wrapped in a global timeout to prevent infinite hangs
       const tx: any = await withTimeout(
         contractInstance.callTx.storeMessage(message),
-        90000, // 90 seconds max for local ZK proving + wallet signature
-        'The ZK generation or wallet signature process timed out. Please hard refresh and try again.'
+        90000,
+        'The ZK proof generation or wallet signature process timed out. Please hard refresh and try again.'
       );
-      
+
       // STATE: SUCCESS
       const newTxId = tx.public.txId;
       setTxHash(newTxId);
-      
+
       updateLogs(`> ✓ TRANSACTION BROADCAST COMPLETE`);
       updateLogs(`> TX_HASH: ${newTxId}`);
       setTerminalStatus('success');
@@ -396,7 +425,7 @@ export function useMidnight(): UseMidnightResult {
         { timestamp: new Date().toISOString(), hash: newTxId },
         ...prev
       ]);
-      
+
       await fetchMessage();
     } catch (err: any) {
       // STATE: ERROR
