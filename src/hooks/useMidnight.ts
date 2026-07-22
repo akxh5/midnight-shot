@@ -346,7 +346,8 @@ export function useMidnight(): UseMidnightResult {
         }
       };
 
-      const proofProvider = await globalConnectedAPI.getProvingProvider(zkConfigProvider);
+      const { dappConnectorProofProvider } = await import('@midnight-ntwrk/midnight-js-dapp-connector-proof-provider');
+      const proofProvider = await dappConnectorProofProvider(globalConnectedAPI, zkConfigProvider, undefined as any);
       
       const privateStateProvider = levelPrivateStateProvider({
         privateStateStoreName: 'hello-world-dapp-state',
