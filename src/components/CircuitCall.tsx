@@ -196,6 +196,14 @@ export const CircuitCall: React.FC<CircuitCallProps> = ({ midnight }) => {
                 >
                   GENERATE PROOF & DISCLOSE
                 </button>
+
+                {/* MANDATORY Level 2 privacy label */}
+                <div className="flex items-center gap-2 border-2 border-black bg-neutral-50 px-4 py-3 rounded-none">
+                  <span className="font-mono text-xs font-black text-neutral-500 select-none">🔒</span>
+                  <p className="font-mono text-xs font-bold text-neutral-700">
+                    Proved without revealing your input — the raw message never leaves your browser.
+                  </p>
+                </div>
               </form>
             )}
 
