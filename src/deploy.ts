@@ -87,7 +87,7 @@ async function createProviders(walletCtx: WalletContext) {
   // The default below is a placeholder for local devnet only — set a strong
   // password via PRIVATE_STATE_PASSWORD when you move to a non-local target.
   const privateStatePassword = process.env.PRIVATE_STATE_PASSWORD?.trim() || 'Local-Devnet-Development-Placeholder-1';
-  const state = await walletCtx.wallet.waitForSyncedState();
+  const state = await waitForDeployReadyState(walletCtx.wallet);
 
   const walletProvider = {
     getCoinPublicKey: () => state.shielded.coinPublicKey.toHexString(),
@@ -123,6 +123,62 @@ async function createProviders(walletCtx: WalletContext) {
   };
 }
 
+// ─── Deploy-scoped sync wait (skips the shielded rail) ─────────────────────────
+//
+// wallet.waitForSyncedState() requires ALL THREE rails — shielded, unshielded,
+// and dust — to independently reach strict completeness before it resolves
+// (wallet-sdk-facade's FacadeState.isSynced ANDs all three; verified by
+// reading dist/index.js, not just the .d.ts). This deploy never spends or
+// receives shielded (Zswap) coins — the constructor is paid for with an
+// unshielded NIGHT UTXO and generated DUST only — but the shielded rail's
+// full-chain trial-decryption is exactly what OOM-crashed this process
+// (observed: 3.3GB, 2.1GB+, and 9.9GB against a 12GB cap, across three runs).
+// Wait only on the two rails this deploy actually touches.
+
+const rawSyncTimeout = Number(process.env.MIDNIGHT_SYNC_TIMEOUT_MS);
+const SYNC_TIMEOUT_MS = Number.isFinite(rawSyncTimeout) && rawSyncTimeout > 0 ? rawSyncTimeout : 300_000;
+
+async function waitForDeployReadyState(wallet: WalletContext['wallet']) {
+  const start = Date.now();
+  let lastLine = '';
+  try {
+    return await Rx.firstValueFrom(
+      wallet.state().pipe(
+        Rx.tap((s) => {
+          const u = s.unshielded.progress;
+          const d = s.dust.state.progress;
+          const elapsed = Math.round((Date.now() - start) / 1000);
+          // Note: these two SyncProgress types aren't the same shape — the
+          // unshielded wallet's is package-local (appliedId/highestTransactionId),
+          // the dust wallet's comes from wallet-sdk-abstractions
+          // (appliedIndex/highestIndex). Caught by tsc, not assumed.
+          const line =
+            `unshielded ${u.appliedId}/${u.highestTransactionId}${u.isStrictlyComplete() ? ' ✓' : ''}` +
+            `  ·  dust ${d.appliedIndex}/${d.highestIndex}${d.isStrictlyComplete() ? ' ✓' : ''}`;
+          if (line !== lastLine) {
+            process.stdout.write(`\r  ⏳ [${elapsed}s] ${line}                    `);
+            lastLine = line;
+          }
+        }),
+        Rx.filter((s) => s.unshielded.progress.isStrictlyComplete() && s.dust.state.progress.isStrictlyComplete()),
+        Rx.timeout(SYNC_TIMEOUT_MS),
+      ),
+    );
+  } catch (err: any) {
+    if (err?.name === 'TimeoutError') {
+      throw new Error(
+        `Timed out after ${Math.round(SYNC_TIMEOUT_MS / 1000)}s waiting for unshielded+dust sync ` +
+          `(shielded sync is intentionally skipped — see comment above). ` +
+          `Last observed progress: ${lastLine || 'none — no state emitted at all'}. ` +
+          `Override with MIDNIGHT_SYNC_TIMEOUT_MS if the network is just slow.`,
+      );
+    }
+    throw err;
+  } finally {
+    process.stdout.write('\n');
+  }
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -140,17 +196,11 @@ async function main() {
     console.log(`  Restored ${restoredCount}/3 child wallets from .midnight-wallet-state — sync will resume from saved point.`);
   }
 
-  console.log('  Syncing with network...');
-  console.log('  ℹ  This may take several minutes depending on network size.');
+  console.log('  Syncing with network (unshielded + dust only — shielded sync is skipped, see waitForDeployReadyState)...');
+  console.log('  ℹ  This may take a while depending on network size.');
   console.log('     RPC disconnection messages during sync are normal and can be safely ignored.\n');
-  const syncStart = Date.now();
-  const syncInterval = setInterval(() => {
-    const elapsed = Math.round((Date.now() - syncStart) / 1000);
-    process.stdout.write(`\r  ⏳ Still syncing... (${elapsed}s elapsed)   `);
-  }, 5000);
-  const state = await walletCtx.wallet.waitForSyncedState();
-  clearInterval(syncInterval);
-  process.stdout.write('\r  ✓ Synced with network.                                      \n');
+  const state = await waitForDeployReadyState(walletCtx.wallet);
+  console.log('  ✓ Unshielded + dust synced.');
 
   // Persist sync state now so a later deploy failure doesn't waste the sync work.
   await persistWalletState(network, walletCtx);
@@ -323,7 +373,7 @@ async function main() {
       }
 
       if (isDustShortage) {
-        const currentState = await walletCtx.wallet.waitForSyncedState();
+        const currentState = await waitForDeployReadyState(walletCtx.wallet);
         const dustBalance = currentState.dust.balance(new Date());
         if (attempt < MAX_RETRIES) {
           if (attempt === 1) {
