@@ -7,11 +7,40 @@ import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-p
 import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
 import { findDeployedContract } from '@midnight-ntwrk/midnight-js-contracts';
 import { CompiledContract } from '@midnight-ntwrk/compact-js';
-import * as HelloWorld from '../../contracts/managed/hello-world/contract/index.js';
+import { setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
+import * as Disclosure from '../../contracts/managed/disclosure/contract/index.js';
+import {
+  makeDisclosureWitnesses,
+  prepareSubmission,
+  setPendingSubmit,
+  setPendingProve,
+  EMPTY_DISCLOSURE_PRIVATE_STATE,
+  type DisclosurePrivateState,
+  type DisclosureRecord,
+} from '../disclosure-witnesses';
 
-const PREPROD_CONTRACT_ADDRESS = '1e773bbc8d2e7a6af104d1ade8f3a2bd32fb4d5b2cc507c5f38ca43dfe861751';
+// Must run before any provider is constructed or any address is parsed —
+// midnight-js and compact-runtime read this global to know how to encode
+// and decode addresses, keys, and tokens. Calling it here, at module load,
+// guarantees it runs before every function below (all of which are lazily
+// invoked closures) ever executes.
+setNetworkId('preprod');
+
+// TODO(deploy): replace with the real Preprod contract address once
+// `npm run setup -- --network preprod` has been run against
+// contracts/disclosure.compact and a local proof server (Docker was
+// unavailable in the environment this rewire was written in — see
+// DEPLOYMENT.md). This is a placeholder, not a real address — every
+// network call below is written to fail loudly rather than silently
+// pretend to work against it.
+const PREPROD_CONTRACT_ADDRESS = 'TODO_PENDING_PREPROD_DEPLOYMENT';
 const PREPROD_INDEXER_URL = 'https://indexer.preprod.midnight.network/api/v4/graphql';
 const PREPROD_INDEXER_WS_URL = 'wss://indexer.preprod.midnight.network/api/v4/graphql/ws';
+const DISCLOSURE_PRIVATE_STATE_ID = 'disclosure-private-state';
+
+function isDeployed(): boolean {
+  return !PREPROD_CONTRACT_ADDRESS.startsWith('TODO_');
+}
 
 // ==========================================
 // 1. STRICT SINGLETON PATTERN FOR ALL PROVIDERS
@@ -37,6 +66,10 @@ let globalZkConfigProvider: any = null;
 let globalProofProvider: any = null;
 let globalPrivateStateProvider: any = null;
 
+const compiledContract = CompiledContract.make('disclosure', Disclosure.Contract).pipe(
+  CompiledContract.withWitnesses(makeDisclosureWitnesses()),
+);
+
 // Lazily initialise the three heavy providers after wallet connects.
 // Subsequent calls return the already-created instances.
 const getSessionProviders = async () => {
@@ -45,22 +78,16 @@ const getSessionProviders = async () => {
   }
   if (!globalZkConfigProvider) {
     globalZkConfigProvider = new FetchZkConfigProvider(
-      typeof window !== 'undefined'
-        ? `${window.location.origin}/managed/hello-world`
-        : ''
+      typeof window !== 'undefined' ? `${window.location.origin}/managed/disclosure` : '',
     );
   }
   if (!globalProofProvider) {
     const { dappConnectorProofProvider } = await import('@midnight-ntwrk/midnight-js-dapp-connector-proof-provider');
-    globalProofProvider = await dappConnectorProofProvider(
-      globalConnectedAPI,
-      globalZkConfigProvider,
-      undefined as any
-    );
+    globalProofProvider = await dappConnectorProofProvider(globalConnectedAPI, globalZkConfigProvider, undefined as any);
   }
   if (!globalPrivateStateProvider) {
     globalPrivateStateProvider = levelPrivateStateProvider({
-      privateStateStoreName: 'hello-world-dapp-state',
+      privateStateStoreName: 'disclosure-dapp-state',
       accountId: globalUnshieldedAddress,
       privateStoragePasswordProvider: async () => 'DApp-Browser-Encrypted-Private-State-Key-1',
     });
@@ -97,18 +124,10 @@ const withTimeout = <T,>(promise: Promise<T>, timeoutMs: number, errorMessage: s
   });
 };
 
-export interface LatestDrop {
-  timestamp: string;
-  hash: string;
-}
-
-export interface VerificationResult {
-  status: 'VERIFIED' | 'FAILED';
-  hash: string;
-  proofType: string;
-  verifierKey: string;
-  timestamp: string;
-  blockHeight: number;
+export interface LedgerSummary {
+  commitmentCount: number;
+  disclosureCount: bigint;
+  commitments: string[];
 }
 
 export interface UseMidnightResult {
@@ -116,22 +135,23 @@ export interface UseMidnightResult {
   isConnecting: boolean;
   error: string | null;
   unshieldedAddress: string | null;
-  currentMessage: string | null;
-  isLoadingMessage: boolean;
+  ledgerSummary: LedgerSummary | null;
+  isLoadingLedger: boolean;
   isSubmitting: boolean;
   txHash: string | null;
   zkStep: string | null;
-  latestDrops: LatestDrop[];
-  isVerifying: boolean;
-  verificationResult: VerificationResult | null;
   terminalLogs: string[];
   terminalStatus: 'idle' | 'running' | 'success' | 'error';
+  lastCommitmentHex: string | null;
+  myDisclosures: DisclosureRecord[];
+  isProvingAuthorship: boolean;
+  authorshipResult: { commitmentHex: string; proved: boolean } | null;
   connect: () => Promise<void>;
   disconnect: () => Promise<void>;
-  storeMessageOnChain: (message: string) => Promise<void>;
-  fetchMessage: () => Promise<void>;
-  verifyTransaction: (txHash: string) => Promise<void>;
-  clearVerification: () => void;
+  submitDisclosure: (message: string) => Promise<void>;
+  fetchLedgerSummary: () => Promise<void>;
+  proveAuthorship: (record: DisclosureRecord) => Promise<void>;
+  clearAuthorshipResult: () => void;
   clearTerminal: () => void;
 }
 
@@ -140,10 +160,14 @@ export function useMidnight(): UseMidnightResult {
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [unshieldedAddress, setUnshieldedAddress] = useState<string | null>(null);
-  const [currentMessage, setCurrentMessage] = useState<string | null>(null);
-  const [isLoadingMessage, setIsLoadingMessage] = useState(false);
+  const [ledgerSummary, setLedgerSummary] = useState<LedgerSummary | null>(null);
+  const [isLoadingLedger, setIsLoadingLedger] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [txHash, setTxHash] = useState<string | null>(null);
+  const [lastCommitmentHex, setLastCommitmentHex] = useState<string | null>(null);
+  const [myDisclosures, setMyDisclosures] = useState<DisclosureRecord[]>([]);
+  const [isProvingAuthorship, setIsProvingAuthorship] = useState(false);
+  const [authorshipResult, setAuthorshipResult] = useState<{ commitmentHex: string; proved: boolean } | null>(null);
 
   const isConnectingRef = useRef(false);
 
@@ -152,17 +176,13 @@ export function useMidnight(): UseMidnightResult {
   const [terminalLogs, setTerminalLogs] = useState<string[]>([]);
   const [terminalStatus, setTerminalStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle');
 
-  const [latestDrops, setLatestDrops] = useState<LatestDrop[]>([
-    { timestamp: new Date(Date.now() - 3600000 * 2).toISOString(), hash: '1e773bbc8d2e7a6af104d1ade8f3a2bd32fb4d5b2cc507c5f38ca43dfe861751' },
-    { timestamp: new Date(Date.now() - 3600000 * 1.5).toISOString(), hash: '5b38ca43dfe8617511e773bbc8d2e7a6af104d1ade8f3a2bd32fb4d5b2cc507c' },
-    { timestamp: new Date(Date.now() - 3600000 * 0.8).toISOString(), hash: '1ade8f3a2bd32fb4d5b2cc507c5f38ca43dfe8617511e773bbc8d2e7a6af104' },
-  ]);
-  const [isVerifying, setIsVerifying] = useState(false);
-  const [verificationResult, setVerificationResult] = useState<VerificationResult | null>(null);
-
   const clearTerminal = useCallback(() => {
     setTerminalLogs([]);
     setTerminalStatus('idle');
+  }, []);
+
+  const clearAuthorshipResult = useCallback(() => {
+    setAuthorshipResult(null);
   }, []);
 
   const disconnect = useCallback(async () => {
@@ -172,7 +192,7 @@ export function useMidnight(): UseMidnightResult {
     // and no orphaned stream listeners accumulate on the Lace bridge.
     clearSessionProviders();
     setError(null);
-    setCurrentMessage(null);
+    setMyDisclosures([]);
     if (typeof window !== 'undefined') {
       localStorage.removeItem('midnight_reconnect_lace');
     }
@@ -182,23 +202,23 @@ export function useMidnight(): UseMidnightResult {
   const connect = useCallback(async () => {
     if (typeof window === 'undefined') return;
     if (isConnectingRef.current) return;
-    
+
     isConnectingRef.current = true;
     setIsConnecting(true);
     setError(null);
-    
+
     try {
       if (!window.midnight) {
         throw new Error('Lace Wallet not detected. Please install the Lace extension.');
       }
-      
+
       const midnightWallets = window.midnight;
       let initialAPI = midnightWallets?.lace || midnightWallets?.mnLace;
-      
+
       if (!initialAPI) {
         const keys = Object.keys(midnightWallets);
         if (keys.length > 0) {
-          const laceKey = keys.find(k => k.toLowerCase().includes('lace'));
+          const laceKey = keys.find((k) => k.toLowerCase().includes('lace'));
           initialAPI = midnightWallets[laceKey || keys[0]];
         }
       }
@@ -206,40 +226,55 @@ export function useMidnight(): UseMidnightResult {
       if (!initialAPI) {
         throw new Error('Lace Wallet not detected. Please install the Lace extension.');
       }
-      
+
       // Explicit connection handshake with timeout
-      const api = await withTimeout(
-        initialAPI.connect('preprod'), 
-        15000, 
-        'Wallet connection handshake timed out.'
+      const api = await withTimeout(initialAPI.connect('preprod'), 15000, 'Wallet connection handshake timed out.');
+
+      // Explicit network check: compare the wallet's actual configured network
+      // against 'preprod', rather than inferring a mismatch from error text.
+      const configuration = await withTimeout(
+        api.getConfiguration(),
+        10000,
+        'Failed to read wallet network configuration.',
       );
-      
+      if (configuration.networkId !== 'preprod') {
+        throw new Error(
+          `Network mismatch: wallet is connected to "${configuration.networkId}", but this app requires "preprod". Switch your Lace wallet to the Preprod network and reconnect.`,
+        );
+      }
+
       const { unshieldedAddress: address } = await withTimeout(
         api.getUnshieldedAddress(),
         10000,
-        'Address fetch timed out.'
+        'Address fetch timed out.',
       );
-      
+
       globalConnectedAPI = api;
       globalUnshieldedAddress = address;
 
       setUnshieldedAddress(address);
       setIsConnected(true);
-      
+
       localStorage.setItem('midnight_reconnect_lace', 'true');
     } catch (err: any) {
       console.error('Wallet connection error:', err);
       const errMsg = err?.message || '';
       let cleanErr = 'Failed to connect to Lace Wallet';
-      
-      if (errMsg.toLowerCase().includes('reject') || errMsg.toLowerCase().includes('cancel') || errMsg.toLowerCase().includes('deny')) {
+
+      if (errMsg.toLowerCase().includes('network mismatch')) {
+        cleanErr = errMsg;
+      } else if (
+        errMsg.toLowerCase().includes('reject') ||
+        errMsg.toLowerCase().includes('cancel') ||
+        errMsg.toLowerCase().includes('deny')
+      ) {
         cleanErr = 'Connection request was rejected or closed by the user.';
-      } else if (errMsg.toLowerCase().includes('network') || errMsg.toLowerCase().includes('preprod')) {
-        cleanErr = 'Network mismatch. Please configure Lace wallet extension to Preprod.';
       } else if (errMsg.toLowerCase().includes('time')) {
         cleanErr = 'Wallet connection timed out. The extension might be unresponsive.';
+      } else if (errMsg) {
+        cleanErr = errMsg;
       }
-      
+
       setError(cleanErr);
       await disconnect();
     } finally {
@@ -252,269 +287,280 @@ export function useMidnight(): UseMidnightResult {
   useEffect(() => {
     if (typeof window === 'undefined') return;
     let timer: NodeJS.Timeout;
-    
+
     const shouldReconnect = localStorage.getItem('midnight_reconnect_lace') === 'true';
     if (shouldReconnect) {
       timer = setTimeout(() => {
         connect();
       }, 600);
     }
-    
+
     return () => {
       if (timer) clearTimeout(timer);
     };
   }, [connect]);
 
-  // Fetch public contract message state from indexer
-  const fetchMessage = useCallback(async () => {
+  // Public ledger read — commitment count + commitment list only. No plaintext
+  // ever existed on this ledger to read: `commitments` is a Set<Bytes<32>> of
+  // persistentHash commitments, `disclosureCount` a Counter. Works without a
+  // wallet connection (visitors have no local proof server) since it only
+  // talks to the public indexer.
+  const fetchLedgerSummary = useCallback(async () => {
     if (typeof window === 'undefined') return;
-    setIsLoadingMessage(true);
-    
+    if (!isDeployed()) return;
+    setIsLoadingLedger(true);
+
     try {
       const publicDataProvider = getPublicDataProvider();
       if (!publicDataProvider) return;
-      
+
       const contractState = await publicDataProvider.queryContractState(PREPROD_CONTRACT_ADDRESS);
       if (contractState && contractState.data) {
-        const ledgerState = HelloWorld.ledger(contractState.data);
-        const msg = typeof ledgerState.message === 'string' 
-          ? ledgerState.message 
-          : new TextDecoder().decode(new Uint8Array(ledgerState.message as any));
-        setCurrentMessage(msg);
+        const ledgerState = Disclosure.ledger(contractState.data);
+        const commitments = Array.from(ledgerState.commitments).map((c) => Buffer.from(c).toString('hex'));
+        setLedgerSummary({
+          commitmentCount: commitments.length,
+          disclosureCount: ledgerState.disclosureCount,
+          commitments,
+        });
       } else {
-        setCurrentMessage(null);
+        setLedgerSummary({ commitmentCount: 0, disclosureCount: 0n, commitments: [] });
       }
     } catch (err: any) {
-      console.error('Error fetching contract state:', err);
+      console.error('Error fetching ledger state:', err);
     } finally {
-      setIsLoadingMessage(false);
+      setIsLoadingLedger(false);
     }
   }, []);
 
   useEffect(() => {
     let isMounted = true;
     if (isMounted && typeof window !== 'undefined') {
-      fetchMessage();
+      fetchLedgerSummary();
     }
     return () => {
       isMounted = false;
     };
-  }, [fetchMessage]);
+  }, [fetchLedgerSummary]);
+
+  const getContractInstance = useCallback(async () => {
+    const { zkConfigProvider, proofProvider, privateStateProvider } = await getSessionProviders();
+
+    const shieldedAddresses = await globalConnectedAPI!.getShieldedAddresses();
+    const walletProvider = {
+      getCoinPublicKey: () => shieldedAddresses.shieldedCoinPublicKey,
+      getEncryptionPublicKey: () => shieldedAddresses.shieldedEncryptionPublicKey,
+      balanceTx: async (tx: string) => {
+        const result = await withTimeout(
+          globalConnectedAPI!.balanceUnsealedTransaction(tx),
+          45000,
+          'Wallet signature request timed out.',
+        );
+        return result.tx;
+      },
+      submitTx: async (tx: string) => {
+        await withTimeout(globalConnectedAPI!.submitTransaction(tx), 30000, 'Transaction broadcast timed out.');
+      },
+    };
+
+    const publicDataProvider = getPublicDataProvider();
+    if (!publicDataProvider) throw new Error('Public Data Provider not initialized');
+
+    const providers = {
+      privateStateProvider,
+      publicDataProvider,
+      zkConfigProvider,
+      proofProvider,
+      walletProvider,
+      midnightProvider: walletProvider,
+    };
+
+    // The private state provider requires setContractAddress() before any
+    // get/set — normally findDeployedContract() does this internally, but
+    // here we need to read private state *before* calling it (to decide
+    // whether to pass initialPrivateState), so call it explicitly first.
+    // findDeployedContract() calling it again afterward with the same
+    // address is harmless.
+    privateStateProvider.setContractAddress(PREPROD_CONTRACT_ADDRESS);
+
+    // Only seed `initialPrivateState` the first time this browser profile
+    // talks to this contract — passing it on every connect would overwrite
+    // (and wipe) whatever disclosure history is already stored.
+    const priorPrivateState: DisclosurePrivateState | null = await privateStateProvider.get(
+      DISCLOSURE_PRIVATE_STATE_ID,
+    );
+    const findOptions =
+      priorPrivateState === null
+        ? {
+            compiledContract,
+            contractAddress: PREPROD_CONTRACT_ADDRESS,
+            privateStateId: DISCLOSURE_PRIVATE_STATE_ID,
+            initialPrivateState: EMPTY_DISCLOSURE_PRIVATE_STATE,
+          }
+        : {
+            compiledContract,
+            contractAddress: PREPROD_CONTRACT_ADDRESS,
+            privateStateId: DISCLOSURE_PRIVATE_STATE_ID,
+          };
+
+    const contractInstance: any = await findDeployedContract(providers as any, findOptions as any);
+    setMyDisclosures((priorPrivateState ?? EMPTY_DISCLOSURE_PRIVATE_STATE).disclosures);
+    return contractInstance;
+  }, []);
 
   // ==========================================
   // 3. DETERMINISTIC STATE MACHINE FOR ZK PROOF
   // ==========================================
-  const storeMessageOnChain = useCallback(async (message: string) => {
-    if (typeof window === 'undefined') throw new Error('Client-side only');
-    if (!isConnected || !globalUnshieldedAddress) {
-      throw new Error('Wallet not connected');
-    }
-
-    // STATE: INITIALIZING
-    setIsSubmitting(true);
-    setError(null);
-    setTxHash(null);
-    setTerminalStatus('running');
-    
-    let currentLogs: string[] = ['> INITIALIZING ZERO-KNOWLEDGE PROOF OPERATOR...'];
-    const updateLogs = (msg: string) => {
-      currentLogs = [...currentLogs, msg];
-      setTerminalLogs(currentLogs);
-    };
-    setTerminalLogs([...currentLogs]);
-
-    try {
-      // STATE: COMPILING — get/reuse singleton providers (zero new listeners registered)
-      const s1 = '> [1/4] Compiling ZK Circuit...';
-      setZkStep(s1);
-      updateLogs(s1);
-
-      // STATE: VERIFYING WALLET SESSION
-      const s2 = '> [2/4] Verifying Active Wallet Session...';
-      setZkStep(s2);
-      updateLogs(s2);
-
-      if (!globalConnectedAPI) {
-        throw new Error('Active wallet session lost. Please reconnect your wallet.');
+  const submitDisclosure = useCallback(
+    async (message: string) => {
+      if (typeof window === 'undefined') throw new Error('Client-side only');
+      if (!isDeployed()) throw new Error('Contract not yet deployed to Preprod — see DEPLOYMENT.md.');
+      if (!isConnected || !globalUnshieldedAddress) {
+        throw new Error('Wallet not connected');
       }
 
-      // Retrieve (or lazily initialise) the three session-scoped singleton providers.
-      // getSessionProviders() guarantees that dappConnectorProofProvider, zkConfigProvider,
-      // and privateStateProvider are each created at most once per wallet session,
-      // preventing the duplicate listener registration that caused MaxListenersExceededWarning.
-      const { zkConfigProvider, proofProvider, privateStateProvider } = await getSessionProviders();
+      setIsSubmitting(true);
+      setError(null);
+      setTxHash(null);
+      setLastCommitmentHex(null);
+      setTerminalStatus('running');
 
-      // STATE: AWAITING SIGNATURE
-      const s3 = '> [3/4] Generating Proof & Awaiting Wallet Signature...';
-      setZkStep(s3);
-      updateLogs(s3);
-      updateLogs('> Requesting Lace Wallet signature verification...');
-
-      const shieldedAddresses = await globalConnectedAPI.getShieldedAddresses();
-
-      // walletProvider is a thin stateless wrapper — safe to create per-call
-      const walletProvider = {
-        getCoinPublicKey: () => shieldedAddresses.shieldedCoinPublicKey,
-        getEncryptionPublicKey: () => shieldedAddresses.shieldedEncryptionPublicKey,
-        balanceTx: async (tx: string) => {
-          try {
-            const result = await withTimeout(
-              globalConnectedAPI!.balanceUnsealedTransaction(tx),
-              45000,
-              'Wallet signature request timed out.'
-            );
-            return result.tx;
-          } catch (err: any) {
-            console.error('balanceUnsealedTransaction error:', err);
-            throw err;
-          }
-        },
-        submitTx: async (tx: string) => {
-          try {
-            updateLogs('> [4/4] Broadcasting to Preprod Network...');
-            setZkStep('> [4/4] Broadcasting to Preprod Network...');
-            await withTimeout(
-              globalConnectedAPI!.submitTransaction(tx),
-              30000,
-              'Transaction broadcast timed out.'
-            );
-          } catch (err: any) {
-            console.error('submitTransaction error:', err);
-            throw err;
-          }
-        },
+      let currentLogs: string[] = ['> INITIALIZING ZERO-KNOWLEDGE PROOF OPERATOR...'];
+      const updateLogs = (msg: string) => {
+        currentLogs = [...currentLogs, msg];
+        setTerminalLogs(currentLogs);
       };
+      setTerminalLogs([...currentLogs]);
 
-      const publicDataProvider = getPublicDataProvider();
-      if (!publicDataProvider) throw new Error('Public Data Provider not initialized');
+      try {
+        const s1 = '> [1/4] Salting & hashing disclosure locally (H(message || nonce))...';
+        setZkStep(s1);
+        updateLogs(s1);
 
-      const providers = {
-        privateStateProvider,
-        publicDataProvider,
-        zkConfigProvider,
-        proofProvider,
-        walletProvider,
-        midnightProvider: walletProvider,
-      };
+        // The raw message is consumed here to derive the salted secret, and
+        // is never referenced again — it does not get stored, logged, or
+        // passed to any provider beyond this point.
+        const { secret, record } = await prepareSubmission(message);
 
-      const compiledContract = CompiledContract.make('hello-world', HelloWorld.Contract).pipe(
-        CompiledContract.withVacantWitnesses
-      );
+        const s2 = '> [2/4] Verifying Active Wallet Session...';
+        setZkStep(s2);
+        updateLogs(s2);
 
-      const contractInstance: any = await findDeployedContract(providers as any, {
-        compiledContract: compiledContract as any,
-        contractAddress: PREPROD_CONTRACT_ADDRESS,
-      });
+        if (!globalConnectedAPI) {
+          throw new Error('Active wallet session lost. Please reconnect your wallet.');
+        }
 
-      // STATE: EXECUTE & BROADCAST — wrapped in a global timeout to prevent infinite hangs
-      const tx: any = await withTimeout(
-        contractInstance.callTx.storeMessage(message),
-        90000,
-        'The ZK proof generation or wallet signature process timed out. Please hard refresh and try again.'
-      );
+        setPendingSubmit(secret, record);
+        const contractInstance = await getContractInstance();
 
-      // STATE: SUCCESS
-      const newTxId = tx.public.txId;
-      setTxHash(newTxId);
+        const s3 = '> [3/4] Generating Proof & Awaiting Wallet Signature...';
+        setZkStep(s3);
+        updateLogs(s3);
+        updateLogs('> Requesting Lace Wallet signature verification...');
 
-      updateLogs(`> ✓ TRANSACTION BROADCAST COMPLETE`);
-      updateLogs(`> TX_HASH: ${newTxId}`);
-      setTerminalStatus('success');
+        const tx: any = await withTimeout(
+          contractInstance.callTx.submitDisclosure(),
+          90000,
+          'The ZK proof generation or wallet signature process timed out. Please hard refresh and try again.',
+        );
 
-      setLatestDrops(prev => [
-        { timestamp: new Date().toISOString(), hash: newTxId },
-        ...prev
-      ]);
+        updateLogs('> [4/4] Broadcasting to Preprod Network...');
+        setZkStep('> [4/4] Broadcasting to Preprod Network...');
 
-      await fetchMessage();
-    } catch (err: any) {
-      // STATE: ERROR
-      console.error('Transaction flow failed:', err);
-      const rawMsg = err?.message || 'Transaction execution failed';
-      let cleanError = rawMsg;
-      
-      if (rawMsg.toLowerCase().includes('reject') || rawMsg.toLowerCase().includes('cancel') || rawMsg.toLowerCase().includes('deny')) {
-        cleanError = 'Wallet signature request was rejected by the user.';
-      } else if (rawMsg.toLowerCase().includes('fund') || rawMsg.toLowerCase().includes('balance') || rawMsg.toLowerCase().includes('fee') || rawMsg.toLowerCase().includes('value')) {
-        cleanError = 'Insufficient gas fees (tNIGHT tokens) to sign and balance the transaction.';
-      } else if (rawMsg.toLowerCase().includes('time')) {
-        cleanError = 'Transaction timed out. The Lace extension or ZK provider may be unresponsive.';
+        const newTxId = tx.public.txId;
+        setTxHash(newTxId);
+        setLastCommitmentHex(record.commitmentHex);
+        setMyDisclosures((prev) => [...prev, record]);
+
+        updateLogs(`> ✓ COMMITMENT WRITTEN TO LEDGER`);
+        updateLogs(`> TX_HASH: ${newTxId}`);
+        updateLogs(`> COMMITMENT: ${record.commitmentHex}`);
+        setTerminalStatus('success');
+
+        await fetchLedgerSummary();
+      } catch (err: any) {
+        console.error('Transaction flow failed:', err);
+        const rawMsg = err?.message || 'Transaction execution failed';
+        let cleanError = rawMsg;
+
+        if (rawMsg.toLowerCase().includes('reject') || rawMsg.toLowerCase().includes('cancel') || rawMsg.toLowerCase().includes('deny')) {
+          cleanError = 'Wallet signature request was rejected by the user.';
+        } else if (rawMsg.toLowerCase().includes('fund') || rawMsg.toLowerCase().includes('balance') || rawMsg.toLowerCase().includes('fee') || rawMsg.toLowerCase().includes('value')) {
+          cleanError = 'Insufficient gas fees (tNIGHT tokens) to sign and balance the transaction.';
+        } else if (rawMsg.toLowerCase().includes('time')) {
+          cleanError = 'Transaction timed out. The Lace extension or ZK provider may be unresponsive.';
+        }
+
+        setError(cleanError);
+        updateLogs(`> [ERROR] ${cleanError}`);
+        setTerminalStatus('error');
+      } finally {
+        setIsSubmitting(false);
+        setZkStep(null);
+      }
+    },
+    [isConnected, getContractInstance, fetchLedgerSummary],
+  );
+
+  // Prove knowledge of the preimage of a commitment already on the ledger,
+  // without revealing the secret. Only ever runs against a disclosure this
+  // browser profile itself submitted (from its local private state).
+  const proveAuthorship = useCallback(
+    async (record: DisclosureRecord) => {
+      if (typeof window === 'undefined') throw new Error('Client-side only');
+      if (!isDeployed()) throw new Error('Contract not yet deployed to Preprod — see DEPLOYMENT.md.');
+      if (!isConnected || !globalUnshieldedAddress) {
+        throw new Error('Wallet not connected');
       }
 
-      setError(cleanError);
-      updateLogs(`> [ERROR] ${cleanError}`);
-      setTerminalStatus('error');
-    } finally {
-      // CLEANUP
-      setIsSubmitting(false);
-      setZkStep(null);
-    }
-  }, [isConnected, fetchMessage]);
+      setIsProvingAuthorship(true);
+      setError(null);
 
-  // Verify
-  const verifyTransaction = useCallback(async (hashToVerify: string) => {
-    const cleanHash = hashToVerify.trim();
-    if (!cleanHash) return;
+      try {
+        const secretBytes = Buffer.from(record.secretHex, 'hex');
+        setPendingProve(secretBytes);
+        const contractInstance = await getContractInstance();
 
-    setIsVerifying(true);
-    setVerificationResult(null);
+        const tx: any = await withTimeout(
+          contractInstance.callTx.proveAuthorship(),
+          90000,
+          'Proof generation timed out. Please try again.',
+        );
 
-    await new Promise(r => setTimeout(r, 1800));
-
-    try {
-      const match = latestDrops.find(d => d.hash.includes(cleanHash) || cleanHash.includes(d.hash));
-      
-      if (match || cleanHash.length >= 10) {
-        setVerificationResult({
-          status: 'VERIFIED',
-          hash: cleanHash,
-          proofType: 'Plonk / zk-SNARK',
-          verifierKey: 'storeMessage.verifier',
-          timestamp: match ? match.timestamp : new Date().toISOString(),
-          blockHeight: 147580 + Math.floor(Math.random() * 5000),
-        });
-      } else {
-        setVerificationResult({
-          status: 'FAILED',
-          hash: cleanHash,
-          proofType: 'N/A',
-          verifierKey: 'N/A',
-          timestamp: new Date().toISOString(),
-          blockHeight: 0,
-        });
+        const proved: boolean = tx.private.result;
+        setAuthorshipResult({ commitmentHex: record.commitmentHex, proved });
+      } catch (err: any) {
+        console.error('proveAuthorship failed:', err);
+        setError(err?.message || 'Failed to prove authorship');
+      } finally {
+        setIsProvingAuthorship(false);
       }
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setIsVerifying(false);
-    }
-  }, [latestDrops]);
-
-  const clearVerification = useCallback(() => {
-    setVerificationResult(null);
-  }, []);
+    },
+    [isConnected, getContractInstance],
+  );
 
   return {
     isConnected,
     isConnecting,
     error,
     unshieldedAddress,
-    currentMessage,
-    isLoadingMessage,
+    ledgerSummary,
+    isLoadingLedger,
     isSubmitting,
     txHash,
     zkStep,
-    latestDrops,
-    isVerifying,
-    verificationResult,
     terminalLogs,
     terminalStatus,
+    lastCommitmentHex,
+    myDisclosures,
+    isProvingAuthorship,
+    authorshipResult,
     connect,
     disconnect,
-    storeMessageOnChain,
-    fetchMessage,
-    verifyTransaction,
-    clearVerification,
-    clearTerminal
+    submitDisclosure,
+    fetchLedgerSummary,
+    proveAuthorship,
+    clearAuthorshipResult,
+    clearTerminal,
   };
 }
