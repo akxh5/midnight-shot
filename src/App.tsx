@@ -30,7 +30,8 @@ export const App: React.FC = () => {
           </div>
           
           <p className="text-lg md:text-xl font-bold tracking-tight text-neutral-800 max-w-4xl border-t-2 border-black pt-4">
-            A cryptographic whistleblower disclosure and verification client powered by zero-knowledge proofs. Proving is completed entirely client-side.
+            A cryptographic whistleblower disclosure platform powered by zero-knowledge proofs. Every disclosure is
+            salted, hashed, and proved entirely client-side — only the commitment ever reaches the chain.
           </p>
         </header>
 
@@ -46,10 +47,10 @@ export const App: React.FC = () => {
                 SYSTEM SPECS
               </h3>
               <ul className="space-y-2 text-xs font-mono font-bold">
-                <li>&gt; PLATFORM: MIDNIGHT COMPACT</li>
+                <li>&gt; PLATFORM: MIDNIGHT COMPACT 0.23.0</li>
                 <li>&gt; ENGINE: NEXT.JS APP ROUTER</li>
                 <li>&gt; PROOF SCHEME: PLONK ZK-SNARK</li>
-                <li>&gt; CONTRACT VERIFIER KEY: STOREMESSAGE.VERIFIER</li>
+                <li>&gt; CIRCUITS: SUBMITDISCLOSURE, PROVEAUTHORSHIP</li>
                 <li>&gt; RUNTIME: IN-BROWSER FETCHZKCONFIGPROVIDER</li>
               </ul>
             </div>
@@ -67,7 +68,7 @@ export const App: React.FC = () => {
             MIDNIGHT DROP // MOONSHOT HACKATHON SOLUTION
           </div>
           <div className="font-mono font-bold text-[10px] text-neutral-500">
-            COMPACT RUNTIME VER. 0.16.0
+            COMPACT LANGUAGE 0.23.0 // COMPILER 0.31.1
           </div>
         </footer>
       </div>
