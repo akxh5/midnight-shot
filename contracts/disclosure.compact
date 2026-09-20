@@ -1,0 +1,78 @@
+// ============================================================
+// disclosure.compact — Midnight Cryptographic Disclosure Contract
+// ============================================================
+//
+// PRIVACY MODEL
+// ─────────────
+// PUBLIC  (on-chain, visible to anyone):
+//   • commitments : Set<Bytes<32>> — persistentHash commitments of each
+//                   disclosure. A commitment reveals nothing about the
+//                   underlying secret; it only lets anyone verify that
+//                   *some* valid disclosure was submitted and, later,
+//                   that a specific prover knows the preimage of a
+//                   specific commitment (via proveAuthorship).
+//   • disclosureCount : Counter — how many disclosures have been submitted.
+//
+// PRIVATE (never on-chain, never returned to the caller):
+//   • the raw disclosure secret, supplied via the `disclosureSecret`
+//     witness. It is read once per circuit call, hashed, and never
+//     leaves the prover's machine in any other form.
+//
+// WHAT disclose() DOES HERE:
+//   • disclose() is applied ONLY to the output of persistentHash() —
+//     the 32-byte commitment — immediately before it is written to the
+//     ledger (`commitments.insert(disclose(commitment))`). It is never
+//     applied to the witness value itself. The compiler enforces this:
+//     any attempt to write `disclosureSecret()`'s return value straight
+//     to the ledger, disclosed or not, would be writing a value with a
+//     type that never leaves the private-input path.
+//
+// proveAuthorship() lets a holder of a secret prove, on demand, that
+// they know the preimage of a commitment already sitting in the public
+// `commitments` set — without disclosing the secret. It recomputes the
+// commitment from the witness and calls disclose() on that commitment
+// (never the secret) before checking `.member()` — the compiler treats
+// `.member()` as a ledger operation that can disclose a hash of a
+// witness value, so it requires the same explicit disclose() as an
+// insert. Only the derived commitment is ever disclosed; the returned
+// Boolean itself carries no witness data.
+// ============================================================
+
+pragma language_version >= 0.23;
+
+import CompactStandardLibrary;
+
+// Public ledger state — a set of commitments and a running count.
+// No plaintext field exists anywhere in this contract.
+export ledger commitments: Set<Bytes<32>>;
+export ledger disclosureCount: Counter;
+
+// Private witness — supplied locally by the caller's TypeScript driver.
+// Its return value never touches the ledger or a circuit's public output.
+witness disclosureSecret(): Bytes<32>;
+
+// Circuit: commit a private disclosure to the ledger.
+// Flow: read witness -> hash to a 32-byte commitment -> disclose()
+// the commitment only -> insert into the ledger -> increment counter.
+export circuit submitDisclosure(): [] {
+    const secret = disclosureSecret();
+    const commitment = persistentHash<Vector<2, Bytes<32>>>([pad(32, "disclosure:commit:"), secret]);
+    commitments.insert(disclose(commitment));
+    disclosureCount.increment(1);
+}
+
+// Circuit: prove knowledge of the preimage of a commitment already in
+// the ledger, without revealing the secret itself. Returns true only if
+// the caller's witness hashes to a commitment already present in the set.
+//
+// Note: `.member()` is a ledger *query*, not a write, but the compiler
+// still requires disclose() here — checking membership necessarily
+// reveals *which* commitment is being checked (that's the whole point:
+// it lets a verifier confirm this proof concerns a specific, already
+// public ledger entry). The secret itself is still never disclosed —
+// only the derived commitment, exactly as in submitDisclosure().
+export circuit proveAuthorship(): Boolean {
+    const secret = disclosureSecret();
+    const commitment = persistentHash<Vector<2, Bytes<32>>>([pad(32, "disclosure:commit:"), secret]);
+    return commitments.member(disclose(commitment));
+}

@@ -1,0 +1,8 @@
+{
+  "version": 3,
+  "file": "index.js",
+  "sourceRoot": "../../../../",
+  "sources": ["contracts/disclosure.compact", "compiler/standard-library.compact"],
+  "names": [],
+  "mappings": ";;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;EAwCA;;;;;;;;;;;;;MAgBA,AAAA,gBAKC;;;;;;;;;;;;;;;;;;;;;;OAAA;MAYD,AAAA,eAIC;;;;;;;;;;;;;;;;;;;;;;OAAA;;;;;;;;;;GACA;EAtCD;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;IAMA;;;;;;;;;;yEAA0C;IAC1C;;;;;;;;;yEAAuC;;;;;;;GA+BtC;EC9ED,AAAA,kBAAA;oEAAA;;;EDmDA,AAAA,mBAAsC;;0DAAtC,gBAAsC;;;;;;;;;;;;;;GAAA;EAKtC,AAAA,mBAKC;UAJS,QAA2B;UAC3B,YAA0F;iDAAR,QAAM;IAC9F;;;;;;;;;;2HAA4B,YAAU;;;;;wEAA3B;UACX,KAAe;IAAf;;;;;;;;;;6FAAA,KAAe;;;;wEAAA;;GAClB;EAYD,AAAA,kBAIC;UAHS,QAA2B;UAC3B,YAA0F;iDAAR,QAAM;mCACvF;;;;;;;;;;;0JAA4B,YAAU;;;;wGAA3B;GACrB;;;;;;;;;;;;;;;;IA/BD;;;;;uCAAA;;;;;;;;;;;;;;;;4GAA0C;;;;;;uCAA1C;;;;;;;;;;;;4GAA0C;;;;;;;;;;;;;;uCAA1C;;;;;;;;;;;;;;;4GAA0C;;;;;;;;;KAAA;IAC1C;qCAAA;;;;;;;;;;;0GAAuC;KAAA;;;;;;;;;;;;"
+}
