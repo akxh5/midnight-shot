@@ -125,18 +125,26 @@ async function createProviders(walletCtx: WalletContext) {
 
 // ─── Deploy-scoped sync wait (skips the shielded rail) ─────────────────────────
 //
-// wallet.waitForSyncedState() requires ALL THREE rails — shielded, unshielded,
-// and dust — to independently reach strict completeness before it resolves
-// (wallet-sdk-facade's FacadeState.isSynced ANDs all three; verified by
-// reading dist/index.js, not just the .d.ts). This deploy never spends or
-// receives shielded (Zswap) coins — the constructor is paid for with an
-// unshielded NIGHT UTXO and generated DUST only — but the shielded rail's
-// full-chain trial-decryption is exactly what OOM-crashed this process
-// (observed: 3.3GB, 2.1GB+, and 9.9GB against a 12GB cap, across three runs).
-// Wait only on the two rails this deploy actually touches.
+// wallet.waitForSyncedState() — and the FacadeState.isSynced getter it's built
+// on — requires ALL THREE rails (shielded, unshielded, dust) to independently
+// reach strict completeness (verified by reading wallet-sdk-facade's
+// dist/index.js, not just the .d.ts). This deploy never spends or receives
+// shielded (Zswap) coins — the constructor is paid for with an unshielded
+// NIGHT UTXO and generated DUST only — but the shielded rail's full-chain
+// trial-decryption is exactly what OOM-crashed this process (observed:
+// 3.3GB, 2.1GB+, and 9.9GB against a 12GB cap, across three runs).
+//
+// isDeployReadyState() is the single condition every wait in this file must
+// use instead of `s.isSynced` — every bare `Rx.filter(s => s.isSynced)` call
+// hits the exact same all-three-rails gate this was written to avoid, so this
+// predicate is shared rather than reimplemented at each site (that's exactly
+// how the first pass at this fix missed four of five call sites).
+function isDeployReadyState(s: Awaited<ReturnType<WalletContext['wallet']['waitForSyncedState']>>): boolean {
+  return s.unshielded.progress.isStrictlyComplete() && s.dust.state.progress.isStrictlyComplete();
+}
 
 const rawSyncTimeout = Number(process.env.MIDNIGHT_SYNC_TIMEOUT_MS);
-const SYNC_TIMEOUT_MS = Number.isFinite(rawSyncTimeout) && rawSyncTimeout > 0 ? rawSyncTimeout : 300_000;
+const SYNC_TIMEOUT_MS = Number.isFinite(rawSyncTimeout) && rawSyncTimeout > 0 ? rawSyncTimeout : 900_000;
 
 async function waitForDeployReadyState(wallet: WalletContext['wallet']) {
   const start = Date.now();
@@ -151,16 +159,23 @@ async function waitForDeployReadyState(wallet: WalletContext['wallet']) {
           // Note: these two SyncProgress types aren't the same shape — the
           // unshielded wallet's is package-local (appliedId/highestTransactionId),
           // the dust wallet's comes from wallet-sdk-abstractions
-          // (appliedIndex/highestIndex). Caught by tsc, not assumed.
+          // (appliedIndex/highestRelevantWalletIndex/highestIndex/...). Caught
+          // by tsc, not assumed. Logging highestRelevantWalletIndex here — NOT
+          // highestIndex — because isStrictlyComplete() (via isCompleteWithin)
+          // compares appliedIndex against highestRelevantWalletIndex; highestIndex
+          // is never written anywhere in the real (non-simulator) dust sync path
+          // (wallet-sdk-dust-wallet/dist/v1/Sync.js) and would sit at 0 forever
+          // regardless of real progress — logging it looks exactly like a stall
+          // that isn't one.
           const line =
             `unshielded ${u.appliedId}/${u.highestTransactionId}${u.isStrictlyComplete() ? ' ✓' : ''}` +
-            `  ·  dust ${d.appliedIndex}/${d.highestIndex}${d.isStrictlyComplete() ? ' ✓' : ''}`;
+            `  ·  dust ${d.appliedIndex}/${d.highestRelevantWalletIndex}${d.isStrictlyComplete() ? ' ✓' : ''}`;
           if (line !== lastLine) {
             process.stdout.write(`\r  ⏳ [${elapsed}s] ${line}                    `);
             lastLine = line;
           }
         }),
-        Rx.filter((s) => s.unshielded.progress.isStrictlyComplete() && s.dust.state.progress.isStrictlyComplete()),
+        Rx.filter(isDeployReadyState),
         Rx.timeout(SYNC_TIMEOUT_MS),
       ),
     );
@@ -196,17 +211,15 @@ async function main() {
     console.log(`  Restored ${restoredCount}/3 child wallets from .midnight-wallet-state — sync will resume from saved point.`);
   }
 
-  console.log('  Syncing with network (unshielded + dust only — shielded sync is skipped, see waitForDeployReadyState)...');
-  console.log('  ℹ  This may take a while depending on network size.');
-  console.log('     RPC disconnection messages during sync are normal and can be safely ignored.\n');
-  const state = await waitForDeployReadyState(walletCtx.wallet);
-  console.log('  ✓ Unshielded + dust synced.');
-
-  // Persist sync state now so a later deploy failure doesn't waste the sync work.
-  await persistWalletState(network, walletCtx);
-
+  // Unshielded alone is fast (~3s observed) — read the address and balance
+  // off it immediately rather than making the operator wait behind dust
+  // (which can take much longer) just to see a number that's already known.
+  console.log('  Syncing unshielded rail (fast — not waiting on dust or shielded for this)...');
+  const unshieldedState = await Rx.firstValueFrom(
+    walletCtx.wallet.state().pipe(Rx.filter((s) => s.unshielded.progress.isStrictlyComplete())),
+  );
   const address = walletCtx.unshieldedKeystore.getBech32Address();
-  let balance = state.unshielded.balances[unshieldedToken().raw] ?? 0n;
+  let balance = unshieldedState.unshielded.balances[unshieldedToken().raw] ?? 0n;
   console.log(`\n  Wallet Address: ${address}`);
   console.log(`  Balance: ${balance.toLocaleString()} tNight\n`);
 
@@ -219,6 +232,15 @@ async function main() {
     process.exit(1);
   }
 
+  console.log('  Syncing dust rail (unshielded already done; shielded sync is skipped, see waitForDeployReadyState)...');
+  console.log('  ℹ  This may take a while depending on network size.');
+  console.log('     RPC disconnection messages during sync are normal and can be safely ignored.\n');
+  await waitForDeployReadyState(walletCtx.wallet);
+  console.log('  ✓ Unshielded + dust synced.');
+
+  // Persist sync state now so a later deploy failure doesn't waste the sync work.
+  await persistWalletState(network, walletCtx);
+
   // Faucet poll for public networks. The wallet has 0 tNIGHT until the user
   // funds the address from the network's faucet. The display balance is
   // authoritative here (unlike DUST, tNIGHT shows up immediately once the
@@ -227,7 +249,7 @@ async function main() {
     // Same balance idiom used by check-balance.ts:
     //   state.unshielded.balances[unshieldedToken().raw] ?? 0n
     const initialBalance = await Rx.firstValueFrom(walletCtx.wallet.state().pipe(
-      Rx.filter((s) => s.isSynced),
+      Rx.filter(isDeployReadyState),
     ));
     const initialTNight = initialBalance.unshielded.balances[unshieldedToken().raw] ?? 0n;
     if (initialTNight === 0n) {
@@ -241,7 +263,7 @@ async function main() {
       const start = Date.now();
       while (true) {
         await new Promise((r) => setTimeout(r, 10_000));
-        const s = await Rx.firstValueFrom(walletCtx.wallet.state().pipe(Rx.filter((x) => x.isSynced)));
+        const s = await Rx.firstValueFrom(walletCtx.wallet.state().pipe(Rx.filter(isDeployReadyState)));
         const tn = s.unshielded.balances[unshieldedToken().raw] ?? 0n;
         if (tn > 0n) {
           console.log(`\n  Funded! tNIGHT balance: ${tn.toLocaleString()}\n`);
@@ -263,7 +285,7 @@ async function main() {
 
   // Register for DUST.
   console.log('─── DUST Token Setup ───────────────────────────────────────────\n');
-  const dustState = await Rx.firstValueFrom(walletCtx.wallet.state().pipe(Rx.filter((s) => s.isSynced)));
+  const dustState = await Rx.firstValueFrom(walletCtx.wallet.state().pipe(Rx.filter(isDeployReadyState)));
 
   const unregisteredUtxos = dustState.unshielded.availableCoins.filter(
     (c: any) => !c.meta?.registeredForDustGeneration,
@@ -288,7 +310,7 @@ async function main() {
     await Rx.firstValueFrom(
       walletCtx.wallet.state().pipe(
         Rx.throttleTime(5000),
-        Rx.filter((s) => s.isSynced),
+        Rx.filter(isDeployReadyState),
         Rx.filter((s) => s.dust.balance(new Date()) > 0n),
       ),
     );
