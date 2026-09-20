@@ -1,13 +1,9 @@
 /**
- * CLI for interacting with mn-demo contract
+ * CLI for interacting with the deployed disclosure contract.
  */
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
 import { WebSocket } from 'ws';
-import { Buffer } from 'buffer';
 
 // Midnight SDK imports
 import { findDeployedContract } from '@midnight-ntwrk/midnight-js-contracts';
@@ -15,9 +11,16 @@ import { httpClientProofProvider } from '@midnight-ntwrk/midnight-js-http-client
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
 import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
 import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
+import { setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
 import { resolveNetwork, getOrCreateSeed, getDeployment } from './network';
 import { createWallet, persistWalletState, unshieldedToken, type WalletContext } from './wallet';
-import { CompiledContract } from '@midnight-ntwrk/compact-js';
+import {
+  DISCLOSURE_PRIVATE_STATE_ID,
+  DISCLOSURE_PRIVATE_STATE_STORE_NAME,
+  resolveDisclosureZkConfigPath,
+  loadCompiledDisclosureContract,
+} from './disclosure-contract';
+import { prepareSubmission, setPendingSubmit, setPendingProve, type DisclosurePrivateState } from './disclosure-witnesses';
 
 // Enable WebSocket for GraphQL subscriptions
 // @ts-expect-error Required for wallet sync
@@ -26,24 +29,19 @@ globalThis.WebSocket = WebSocket;
 const { network, config: networkConfig } = resolveNetwork();
 const SEED = getOrCreateSeed(network);
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const zkConfigPath = path.resolve(__dirname, '..', 'contracts', 'managed', 'hello-world');
+// Set explicitly here, before any provider is constructed or any address is
+// parsed below.
+setNetworkId(networkConfig.networkId);
 
-// Load compiled contract
-const contractPath = path.join(zkConfigPath, 'contract', 'index.js');
-
-// Check if contract is compiled
-if (!fs.existsSync(contractPath)) {
-  console.error('\n❌ Contract not compiled! Run: npm run compile\n');
+const zkConfigPath = resolveDisclosureZkConfigPath(import.meta.url);
+let Disclosure: any;
+let compiledContract: any;
+try {
+  ({ Disclosure, compiledContract } = await loadCompiledDisclosureContract(zkConfigPath));
+} catch (err: any) {
+  console.error(`\n❌ ${err.message}\n`);
   process.exit(1);
 }
-
-const HelloWorld = await import(pathToFileURL(contractPath).href);
-
-const compiledContract = CompiledContract.make('hello-world', HelloWorld.Contract).pipe(
-  CompiledContract.withVacantWitnesses,
-  CompiledContract.withCompiledFileAssets(zkConfigPath),
-);
 
 // ─── Providers ─────────────────────────────────────────────────────────────────
 
@@ -75,12 +73,14 @@ async function createProviders(walletCtx: WalletContext) {
   const zkConfigProvider = new NodeZkConfigProvider(zkConfigPath);
   const accountId = walletCtx.unshieldedKeystore.getBech32Address().toString();
 
+  const privateStateProvider = levelPrivateStateProvider({
+    privateStateStoreName: DISCLOSURE_PRIVATE_STATE_STORE_NAME,
+    accountId,
+    privateStoragePasswordProvider: () => privateStatePassword,
+  });
+
   return {
-    privateStateProvider: levelPrivateStateProvider({
-      privateStateStoreName: 'hello-world-state',
-      accountId,
-      privateStoragePasswordProvider: () => privateStatePassword,
-    }),
+    privateStateProvider,
     publicDataProvider: indexerPublicDataProvider(networkConfig.indexer, networkConfig.indexerWS),
     zkConfigProvider,
     proofProvider: httpClientProofProvider(networkConfig.proofServer, zkConfigProvider),
@@ -135,9 +135,6 @@ async function main() {
     console.log(`  Balance: ${balance.toLocaleString()} tNight\n`);
 
     // Surface a faucet hint when a public-network wallet has 0 tNIGHT.
-    // Reads (option 2) work without funds, but writes (option 1) need DUST
-    // generated from registered NIGHT — without this hint the next failure
-    // mode is a confusing "Insufficient Funds" deep inside the tx builder.
     if (balance === 0n && network !== 'undeployed' && networkConfig.faucet) {
       const address = walletCtx.unshieldedKeystore.getBech32Address();
       console.log('  ⚠ Wallet has no tNight. Fund it from the faucet to send transactions:');
@@ -152,7 +149,8 @@ async function main() {
     const deployed: any = await findDeployedContract(providers, {
       compiledContract: compiledContract as any,
       contractAddress: deployment.address,
-    });
+      privateStateId: DISCLOSURE_PRIVATE_STATE_ID,
+    } as any);
 
     console.log('  ✅ Connected!\n');
 
@@ -160,22 +158,25 @@ async function main() {
     let running = true;
     while (running) {
       console.log('─── Menu ───────────────────────────────────────────────────────');
-      console.log('  1. Store a message');
-      console.log('  2. Read current message');
-      console.log('  3. Check wallet balance');
-      console.log('  4. Exit\n');
+      console.log('  1. Submit a disclosure');
+      console.log('  2. Read ledger summary (commitment count + list)');
+      console.log('  3. Prove authorship of one of my past disclosures');
+      console.log('  4. Check wallet balance');
+      console.log('  5. Exit\n');
 
       const choice = await rl.question('  Your choice: ');
 
       switch (choice.trim()) {
         case '1': {
-          const message = await rl.question('  Enter your message: ');
-          console.log('\n  Submitting transaction (this may take 30-60 seconds)...');
+          const message = await rl.question('  Enter your disclosure (never stored or transmitted as-is): ');
+          console.log('\n  Salting and hashing locally...');
+          const { secret, record } = await prepareSubmission(message);
+          setPendingSubmit(secret, record);
+          console.log('  Submitting transaction (this may take 30-60 seconds)...');
           try {
-            const tx = await deployed.callTx.storeMessage(message);
-            console.log(`\n  ✅ Message stored: "${message}"`);
-            console.log(`  Transaction ID: ${tx.public.txId}`);
-            console.log(`  Block height: ${tx.public.blockHeight}\n`);
+            const tx = await deployed.callTx.submitDisclosure();
+            console.log(`\n  ✅ Commitment recorded: ${record.commitmentHex}`);
+            console.log(`  Transaction ID: ${tx.public.txId}\n`);
           } catch (error) {
             console.error('\n  ❌ Failed:', error instanceof Error ? error.message : error);
           }
@@ -183,15 +184,20 @@ async function main() {
         }
 
         case '2': {
-          console.log('\n  Reading message from blockchain...');
+          console.log('\n  Reading ledger state from blockchain...');
           try {
             const contractState = await providers.publicDataProvider.queryContractState(deployment.address);
             if (contractState) {
-              const ledgerState = HelloWorld.ledger(contractState.data);
-              const message = Buffer.from(ledgerState.message).toString();
-              console.log(`\n  📋 Current message: "${message}"\n`);
+              const ledgerState = Disclosure.ledger(contractState.data);
+              const commitments = Array.from(ledgerState.commitments as Iterable<Uint8Array>).map((c) =>
+                Buffer.from(c).toString('hex'),
+              );
+              console.log(`\n  📋 Commitments: ${commitments.length}`);
+              console.log(`  📋 Disclosure count: ${ledgerState.disclosureCount}`);
+              commitments.forEach((c) => console.log(`     - ${c}`));
+              console.log('');
             } else {
-              console.log('\n  📋 No message found (contract state empty)\n');
+              console.log('\n  📋 No ledger state found (contract state empty)\n');
             }
           } catch (error) {
             console.error('\n  ❌ Failed:', error instanceof Error ? error.message : error);
@@ -200,6 +206,35 @@ async function main() {
         }
 
         case '3': {
+          const privateState: DisclosurePrivateState | null = await providers.privateStateProvider.get(
+            DISCLOSURE_PRIVATE_STATE_ID,
+          );
+          const disclosures = privateState?.disclosures ?? [];
+          if (disclosures.length === 0) {
+            console.log('\n  No disclosures submitted from this wallet/private-state store yet.\n');
+            break;
+          }
+          console.log('');
+          disclosures.forEach((d, i) => console.log(`  [${i}] ${d.commitmentHex} (${d.submittedAt})`));
+          const idxRaw = await rl.question('\n  Prove which index? ');
+          const idx = Number(idxRaw.trim());
+          const target = disclosures[idx];
+          if (!target) {
+            console.log('\n  Invalid index.\n');
+            break;
+          }
+          setPendingProve(Buffer.from(target.secretHex, 'hex'));
+          console.log('\n  Generating proof...');
+          try {
+            const tx = await deployed.callTx.proveAuthorship();
+            console.log(`\n  ${tx.private.result ? '✅ Proved' : '❌ Not proved'} — commitment ${target.commitmentHex}\n`);
+          } catch (error) {
+            console.error('\n  ❌ Failed:', error instanceof Error ? error.message : error);
+          }
+          break;
+        }
+
+        case '4': {
           console.log('\n  Checking balance...');
           const currentState = await walletCtx.wallet.waitForSyncedState();
           const currentBalance = currentState.unshielded.balances[unshieldedToken().raw] ?? 0n;
@@ -209,13 +244,13 @@ async function main() {
           break;
         }
 
-        case '4':
+        case '5':
           running = false;
           console.log('\n  👋 Goodbye!\n');
           break;
 
         default:
-          console.log('\n  ❌ Invalid choice. Please enter 1-4.\n');
+          console.log('\n  ❌ Invalid choice. Please enter 1-5.\n');
       }
     }
 

@@ -4,11 +4,8 @@
  * Non-interactive: scaffold → npm run setup runs straight through.
  * No readline prompts, no .midnight-seed file.
  */
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { resolveNetwork, getOrCreateSeed, recordDeployment } from './network';
 import { createWallet, persistWalletState, unshieldedToken, type WalletContext } from './wallet';
-import { fileURLToPath, pathToFileURL } from 'node:url';
 import { WebSocket } from 'ws';
 import * as Rx from 'rxjs';
 
@@ -18,7 +15,14 @@ import { httpClientProofProvider } from '@midnight-ntwrk/midnight-js-http-client
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
 import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
 import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
-import { CompiledContract } from '@midnight-ntwrk/compact-js';
+import { setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
+import { EMPTY_DISCLOSURE_PRIVATE_STATE } from './disclosure-witnesses';
+import {
+  DISCLOSURE_PRIVATE_STATE_ID,
+  DISCLOSURE_PRIVATE_STATE_STORE_NAME,
+  resolveDisclosureZkConfigPath,
+  loadCompiledDisclosureContract,
+} from './disclosure-contract';
 
 // @ts-expect-error Required for wallet sync
 globalThis.WebSocket = WebSocket;
@@ -30,6 +34,12 @@ globalThis.WebSocket = WebSocket;
 
 const { network, config: networkConfig } = resolveNetwork();
 const SEED = getOrCreateSeed(network);
+
+// Set explicitly here, before any provider is constructed or any address is
+// parsed below — don't rely on createWallet() doing this as an internal side
+// effect three calls deep in main(). (It does too, redundantly — setNetworkId
+// is idempotent — but this call site shouldn't depend on that.)
+setNetworkId(networkConfig.networkId);
 
 // ─── Proof server readiness ────────────────────────────────────────────────────
 //
@@ -61,21 +71,14 @@ async function waitForProofServer(maxAttempts = 60, delayMs = 2000): Promise<boo
 
 // ─── Compiled contract loading ─────────────────────────────────────────────────
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const zkConfigPath = path.resolve(__dirname, '..', 'contracts', 'managed', 'hello-world');
-const contractPath = path.join(zkConfigPath, 'contract', 'index.js');
-
-if (!fs.existsSync(contractPath)) {
-  console.error('\n❌ Contract not compiled! Run: npm run compile\n');
+const zkConfigPath = resolveDisclosureZkConfigPath(import.meta.url);
+let compiledContract: any;
+try {
+  ({ compiledContract } = await loadCompiledDisclosureContract(zkConfigPath));
+} catch (err: any) {
+  console.error(`\n❌ ${err.message}\n`);
   process.exit(1);
 }
-
-const HelloWorld = await import(pathToFileURL(contractPath).href);
-
-const compiledContract = CompiledContract.make('hello-world', HelloWorld.Contract).pipe(
-  CompiledContract.withVacantWitnesses,
-  CompiledContract.withCompiledFileAssets(zkConfigPath),
-);
 
 // ─── Providers ─────────────────────────────────────────────────────────────────
 
@@ -108,7 +111,7 @@ async function createProviders(walletCtx: WalletContext) {
 
   return {
     privateStateProvider: levelPrivateStateProvider({
-      privateStateStoreName: 'hello-world-state',
+      privateStateStoreName: DISCLOSURE_PRIVATE_STATE_STORE_NAME,
       accountId,
       privateStoragePasswordProvider: () => privateStatePassword,
     }),
@@ -282,6 +285,8 @@ async function main() {
       deployed = await deployContract(providers, {
         compiledContract: compiledContract as any,
         args: [],
+        privateStateId: DISCLOSURE_PRIVATE_STATE_ID,
+        initialPrivateState: EMPTY_DISCLOSURE_PRIVATE_STATE,
       });
       break;
     } catch (err: any) {

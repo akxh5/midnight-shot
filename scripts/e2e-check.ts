@@ -1,12 +1,9 @@
 /**
- * End-to-end smoke check for mn-demo.
+ * End-to-end smoke check for the disclosure contract.
  *
  * Reconnects to the deployed contract, reads its ledger state, and exits 0
  * on success. Used by `npm run test:e2e` and by the project's CI workflows.
  */
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
 import { WebSocket } from 'ws';
 
 import { findDeployedContract } from '@midnight-ntwrk/midnight-js-contracts';
@@ -14,9 +11,15 @@ import { httpClientProofProvider } from '@midnight-ntwrk/midnight-js-http-client
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
 import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
 import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
+import { setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
 import { resolveNetwork, getOrCreateSeed, getDeployment } from '../src/network';
 import { createWallet, persistWalletState } from '../src/wallet';
-import { CompiledContract } from '@midnight-ntwrk/compact-js';
+import {
+  DISCLOSURE_PRIVATE_STATE_ID,
+  DISCLOSURE_PRIVATE_STATE_STORE_NAME,
+  resolveDisclosureZkConfigPath,
+  loadCompiledDisclosureContract,
+} from '../src/disclosure-contract';
 
 // @ts-expect-error wallet sync requires WebSocket
 globalThis.WebSocket = WebSocket;
@@ -25,6 +28,10 @@ globalThis.WebSocket = WebSocket;
 
 const { network, config: networkConfig } = resolveNetwork();
 const SEED = getOrCreateSeed(network);
+
+// Set explicitly here, before any provider is constructed or any address is
+// parsed below.
+setNetworkId(networkConfig.networkId);
 
 function fail(msg: string): never {
   console.error(`❌ e2e-check failed: ${msg}`);
@@ -47,14 +54,9 @@ async function main() {
   }
 
   // 2. Build wallet and providers
-  const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  const zkConfigPath = path.resolve(__dirname, '..', 'contracts', 'managed', 'hello-world');
-  const contractPath = path.join(zkConfigPath, 'contract', 'index.js');
-  if (!fs.existsSync(contractPath)) fail('Compiled contract missing — run `npm run compile`.');
-  const HelloWorld = await import(pathToFileURL(contractPath).href);
-  const compiledContract = CompiledContract.make('hello-world', HelloWorld.Contract).pipe(
-    CompiledContract.withVacantWitnesses,
-    CompiledContract.withCompiledFileAssets(zkConfigPath),
+  const zkConfigPath = resolveDisclosureZkConfigPath(import.meta.url);
+  const { compiledContract } = await loadCompiledDisclosureContract(zkConfigPath).catch((err: any) =>
+    fail(err.message),
   );
 
   const walletCtx = await createWallet({ network, networkConfig, seed: SEED });
@@ -77,7 +79,7 @@ async function main() {
 
   const providers = {
     privateStateProvider: levelPrivateStateProvider({
-      privateStateStoreName: 'hello-world-state',
+      privateStateStoreName: DISCLOSURE_PRIVATE_STATE_STORE_NAME,
       accountId: walletCtx.unshieldedKeystore.getBech32Address().toString(),
       // SDK requires ≥16 chars. e2e-check is read-only so we don't expose
       // the env-var override here — match the deploy script's local-devnet default.
@@ -95,7 +97,8 @@ async function main() {
     await findDeployedContract(providers, {
       contractAddress: deployment.address,
       compiledContract: compiledContract as any,
-    });
+      privateStateId: DISCLOSURE_PRIVATE_STATE_ID,
+    } as any);
   } catch (err: any) {
     await walletCtx.wallet.stop();
     fail(`findDeployedContract threw: ${err?.message ?? err}`);
